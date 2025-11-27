@@ -1,0 +1,23 @@
+# Environments
+.env
+.env.*
+.venv*
+env/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data
+*.parquet
+data/
+
+# OS
+.DS_Store
+Thumbs.db
