@@ -15,9 +15,7 @@ Personal Strava analytics project for:
 - Indoor vs outdoor efficiency
 - Multi-sport training load modeling
 
-## Setup
+## Dashboard
+A first version of a simple dashboard was developed using streamlit
 
-```bash
-python -m venv .venv_testing
-source .venv_testing/Scripts/activate  # Windows Git Bash
-pip install -r requirements.txt
+![dashboard-v1.0](/assets/dashboard-v1.0.png)
