@@ -1,0 +1,35 @@
+athlete:
+  timezone: Europe/Lisbon
+  historical_max_hr_bpm: 207
+  aerobic_hr_upper_bpm: 160
+  resting_hr_bpm: null
+
+cycling:
+  ftp_history:
+    - effective_from: "2020-01-01"
+      watts: 265
+  power_zone_percentages: [0.0, 0.55, 0.75, 0.90, 1.05, 1.20, 10.0]
+
+heart_rate:
+  zones_bpm: [0, 125, 145, 161, 177, 191, 208]
+
+running:
+  pb_references:
+    10_km: "00:39:30"
+    half_marathon: "01:31:42"
+
+load_model:
+  fitness_time_constant_days: 42
+  fatigue_time_constant_days: 7
+  hard_session_load: 100
+  long_session_minutes:
+    cycling: 120
+    running: 75
+    swimming: 60
+
+analysis:
+  decoupling_min_duration_minutes: 60
+  decoupling_min_hr_coverage: 0.80
+  decoupling_min_moving_ratio: 0.85
+  decoupling_max_output_cv: 0.35
+

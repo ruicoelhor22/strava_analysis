@@ -1,0 +1,4 @@
+"""Local-first endurance analytics."""
+
+__version__ = "0.1.0"
+
