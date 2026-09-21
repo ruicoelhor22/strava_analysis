@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
+ xmlns:ns3="http://www.garmin.com/xmlschemas/ActivityExtension/v2">
+  <Activities>
+    <Activity Sport="Biking">
+      <Id>2026-01-15T07:00:00Z</Id>
+      <Lap StartTime="2026-01-15T07:00:00Z">
+        <TotalTimeSeconds>90</TotalTimeSeconds>
+        <DistanceMeters>900</DistanceMeters>
+        <Calories>42</Calories>
+        <AverageHeartRateBpm><Value>145</Value></AverageHeartRateBpm>
+        <MaximumHeartRateBpm><Value>151</Value></MaximumHeartRateBpm>
+        <Track>
+          <Trackpoint>
+            <Time>2026-01-15T07:00:00Z</Time>
+            <Position><LatitudeDegrees>38.7000</LatitudeDegrees><LongitudeDegrees>-9.1000</LongitudeDegrees></Position>
+            <AltitudeMeters>50</AltitudeMeters><DistanceMeters>0</DistanceMeters>
+            <HeartRateBpm><Value>140</Value></HeartRateBpm><Cadence>85</Cadence>
+            <Extensions><ns3:TPX><ns3:Speed>10</ns3:Speed><ns3:Watts>190</ns3:Watts></ns3:TPX></Extensions>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-01-15T07:00:30Z</Time>
+            <Position><LatitudeDegrees>38.7010</LatitudeDegrees><LongitudeDegrees>-9.1010</LongitudeDegrees></Position>
+            <AltitudeMeters>55</AltitudeMeters><DistanceMeters>300</DistanceMeters>
+            <HeartRateBpm><Value>145</Value></HeartRateBpm><Cadence>87</Cadence>
+            <Extensions><ns3:TPX><ns3:Speed>10</ns3:Speed><ns3:Watts>200</ns3:Watts></ns3:TPX></Extensions>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-01-15T07:01:00Z</Time>
+            <Position><LatitudeDegrees>38.7020</LatitudeDegrees><LongitudeDegrees>-9.1020</LongitudeDegrees></Position>
+            <AltitudeMeters>53</AltitudeMeters><DistanceMeters>600</DistanceMeters>
+            <HeartRateBpm><Value>148</Value></HeartRateBpm><Cadence>88</Cadence>
+            <Extensions><ns3:TPX><ns3:Speed>10</ns3:Speed><ns3:Watts>210</ns3:Watts></ns3:TPX></Extensions>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-01-15T07:01:30Z</Time>
+            <Position><LatitudeDegrees>38.7030</LatitudeDegrees><LongitudeDegrees>-9.1030</LongitudeDegrees></Position>
+            <AltitudeMeters>60</AltitudeMeters><DistanceMeters>900</DistanceMeters>
+            <HeartRateBpm><Value>151</Value></HeartRateBpm><Cadence>86</Cadence>
+            <Extensions><ns3:TPX><ns3:Speed>10</ns3:Speed><ns3:Watts>205</ns3:Watts></ns3:TPX></Extensions>
+          </Trackpoint>
+        </Track>
+      </Lap>
+      <Creator xsi:type="Device_t" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <Name>Synthetic Computer</Name><UnitId>000000</UnitId>
+      </Creator>
+    </Activity>
+  </Activities>
+</TrainingCenterDatabase>
+

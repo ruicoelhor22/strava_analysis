@@ -1,23 +1,52 @@
-# Environments
+# Secrets and local configuration
 .env
 .env.*
-.venv*
-env/
-venv/
+!.env.example
+config/athlete.yaml
+.streamlit/secrets.toml
 
 # Python
+.venv/
+venv/
+env/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.test-tmp/
+pytest-cache-files-*/
 
-# Jupyter
-.ipynb_checkpoints/
-
-# Data
-*.parquet
+# Private activity data and databases
 data/
+training_data/
+training_data/auth/
+imports/
+exports/
+backups/
+cookies.txt
+cookies-*.txt
+browser-profile/
+strava-browser-profile/
+storage-state*.json
+strava-session*.json
+*.tcx
+!tests/fixtures/*.tcx
+*.fit
+*.gpx
+*.geojson
+*.parquet
+*.sqlite
+*.sqlite3
+*.db
 
-# OS
+# Local output
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+.streamlit/
+
+# OS / editors
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
