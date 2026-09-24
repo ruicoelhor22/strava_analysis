@@ -223,6 +223,7 @@ class StravaDownloader:
         dry_run: bool = False,
         limit: int | None = None,
         force: bool = False,
+        activity_ids: set[str] | None = None,
         emit: Callable[[str], None] = print,
     ) -> DownloadSummary:
         manifest = resolve_private_path(manifest_path, DEFAULT_MANIFEST)
@@ -231,10 +232,14 @@ class StravaDownloader:
         if not rows:
             raise ValueError(f"Manifest is empty or missing: {manifest}")
         destination.mkdir(parents=True, exist_ok=True)
-        summary = DownloadSummary(expected=len(rows))
+        scoped_rows = [row for row in rows if activity_ids is None or row.strava_id in activity_ids]
+        summary = DownloadSummary(expected=len(scoped_rows))
         candidates: list[ManifestRow] = []
 
-        for row in rows:
+        for row in scoped_rows:
+            if row.download_status == "metadata_only" and not force:
+                summary.already_present += 1
+                continue
             existing = find_valid_download(row, destination)
             if existing is not None and not force:
                 summary.already_present += 1
@@ -246,7 +251,7 @@ class StravaDownloader:
 
         selected = candidates[: max(0, limit)] if limit is not None else candidates
         summary.selected = len(selected)
-        emit(f"Expected: {len(rows)}")
+        emit(f"Expected: {len(scoped_rows)}")
         emit(f"Already present: {summary.already_present}")
         emit(f"Requiring download: {len(candidates)}")
         emit(f"Selected this run: {len(selected)}")

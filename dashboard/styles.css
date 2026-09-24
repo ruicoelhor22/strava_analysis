@@ -1,0 +1,98 @@
+:root {
+  --lab-bg: #0a1119;
+  --lab-panel: #101a24;
+  --lab-panel-raised: #14212d;
+  --lab-border: #293746;
+  --lab-ink: #edf3f7;
+  --lab-muted: #a4b3c1;
+  --lab-accent: #73e0a9;
+  --lab-watch: #f7c873;
+  --lab-danger: #f58b8b;
+  --lab-cycling: #73e0a9;
+  --lab-running: #fcb56b;
+  --lab-swimming: #67b7f7;
+  --lab-strength: #c7a0ff;
+  --lab-other: #a4b3c1;
+  --lab-gap: .75rem;
+  --lab-radius: 7px;
+}
+.stApp { background: var(--lab-bg); color: var(--lab-ink); }
+[data-testid="stSidebar"] { background: #0c151e; border-right: 1px solid var(--lab-border); }
+[data-testid="stHeader"] { background: transparent; }
+.block-container { max-width: 1460px; padding-top: 1.25rem; padding-bottom: 3rem; }
+h1 { font-size: clamp(1.65rem, 2.5vw, 2.1rem) !important; letter-spacing: -.04em !important; margin-bottom: .1rem !important; }
+h2 { font-size: 1.08rem !important; letter-spacing: -.025em !important; }
+h3 { font-size: .83rem !important; text-transform: uppercase; letter-spacing: .08em; }
+[data-testid="stCaptionContainer"], p, label { color: var(--lab-muted); }
+[data-testid="stMetric"] { background: var(--lab-panel); border: 1px solid var(--lab-border); border-radius: var(--lab-radius); padding: .6rem .72rem; min-height: 76px; }
+[data-testid="stMetricLabel"] { text-transform: uppercase; letter-spacing: .08em; font-size: .67rem; }
+[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; font-size: 1.42rem; letter-spacing: -.035em; }
+[data-testid="stDataFrame"], [data-testid="stPlotlyChart"] { max-width: 100%; min-width: 0; border: 1px solid var(--lab-border); border-radius: var(--lab-radius); overflow: auto; }
+[data-testid="stVerticalBlockBorderWrapper"], [data-testid="stExpander"] { border-color: var(--lab-border) !important; border-radius: var(--lab-radius) !important; background: var(--lab-panel); }
+div.stButton > button { min-height: 42px; border-radius: 6px; border-color: #344659; }
+div[data-testid="stProgress"] > div > div { background-color: var(--lab-accent); }
+hr { border-color: var(--lab-border) !important; }
+.eyebrow, .lab-kicker { color: var(--lab-accent); text-transform: uppercase; letter-spacing: .12em; font-size: .67rem; font-weight: 750; }
+.context { color: var(--lab-muted); max-width: 780px; margin: -.15rem 0 1.1rem; font-size: .88rem; }
+.section-label { color: var(--lab-ink); font-size: 1rem; font-weight: 700; margin-top: .45rem; letter-spacing: -.015em; }
+.section-context { color: var(--lab-muted); font-size: .79rem; margin-bottom: .5rem; }
+.status-pill, .decision-pill, .lab-badge { display: inline-block; padding: .18rem .48rem; border: 1px solid var(--lab-border); border-radius: 4px; font-size: .68rem; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
+.status-pill { color: var(--lab-accent); }
+.workout-kicker { color: var(--lab-muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .1em; font-weight: 700; }
+.workout-title { color: var(--lab-ink); font-size: 1.24rem; font-weight: 740; line-height: 1.2; margin: .32rem 0; }
+.workout-meta { color: var(--lab-muted); font-size: .83rem; }
+.lab-hero, .lab-row, .lab-insight { border: 1px solid var(--lab-border); background: var(--lab-panel); border-radius: var(--lab-radius); padding: .85rem 1rem; margin: .35rem 0; }
+.lab-hero { border-left: 3px solid var(--lab-accent); }
+.lab-hero-title { font-size: clamp(1.25rem, 3vw, 1.75rem); color: var(--lab-ink); font-weight: 760; line-height: 1.18; margin: .3rem 0; }
+.lab-sub { color: var(--lab-muted); font-size: .82rem; line-height: 1.4; }
+.lab-facts { display: flex; flex-wrap: wrap; gap: .35rem .9rem; color: var(--lab-ink); font-size: .85rem; margin-top: .45rem; font-variant-numeric: tabular-nums; }
+.lab-facts span { white-space: nowrap; }
+.lab-state-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: var(--lab-gap); margin: .4rem 0; }
+.lab-state { border: 1px solid var(--lab-border); background: var(--lab-panel); border-radius: var(--lab-radius); padding: .6rem .72rem; min-width: 0; }
+.lab-state small { display: block; color: var(--lab-muted); text-transform: uppercase; letter-spacing: .09em; font-size: .64rem; }
+.lab-state strong { display: block; color: var(--lab-ink); font-size: 1rem; line-height: 1.22; margin: .22rem 0; }
+.lab-state em { color: var(--lab-muted); font-size: .72rem; font-style: normal; }
+.lab-week { display: grid; grid-template-columns: 3.5rem 1fr auto; align-items: start; gap: .7rem; border-bottom: 1px solid var(--lab-border); padding: .52rem .2rem; min-width: 0; }
+.lab-week:last-child { border-bottom: 0; }
+.lab-week-grid { display: grid; grid-template-columns: repeat(7, minmax(0,1fr)); gap: .45rem; }
+.lab-day-card { border: 1px solid var(--lab-border); background: var(--lab-panel); border-radius: var(--lab-radius); min-width: 0; padding: .55rem; }
+.lab-day-card.today { border-color: var(--lab-accent); }
+.lab-day-card header { color: var(--lab-muted); font-size: .7rem; font-weight: 750; text-transform: uppercase; margin-bottom: .38rem; }
+.lab-day-session { border-top: 1px solid var(--lab-border); padding: .4rem 0; }
+.lab-day-session strong { display: block; color: var(--lab-ink); font-size: .78rem; line-height: 1.3; overflow-wrap: anywhere; }
+.lab-day-session small { display: block; color: var(--lab-muted); font-size: .69rem; line-height: 1.35; margin-top: .2rem; }
+.lab-week-day { color: var(--lab-muted); font-size: .7rem; font-weight: 750; text-transform: uppercase; line-height: 1.35; }
+.lab-week-main { min-width: 0; }
+.lab-week-main strong { display: block; color: var(--lab-ink); font-size: .86rem; line-height: 1.25; overflow-wrap: anywhere; }
+.lab-week-main small { display: block; color: var(--lab-muted); margin-top: .13rem; font-size: .74rem; line-height: 1.35; }
+.lab-row { border-left: 3px solid var(--sport-color, var(--lab-other)); }
+.lab-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; color: var(--lab-muted); font-size: .69rem; text-transform: uppercase; letter-spacing: .07em; }
+.lab-row-title { color: var(--lab-ink); font-size: 1rem; font-weight: 720; line-height: 1.3; margin: .2rem 0; overflow-wrap: anywhere; }
+.lab-cost { display: grid; grid-template-columns: 6.5rem 1fr auto; align-items: center; gap: .35rem; margin: .3rem 0; font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; }
+.lab-cost-track { height: 5px; background: #2b3b49; border-radius: 5px; overflow: hidden; }
+.lab-cost-fill { height: 100%; background: var(--cost-color, var(--lab-accent)); width: var(--cost-width, 0%); }
+.lab-cost-value { color: var(--lab-muted); min-width: 3.2rem; text-align: right; }
+.lab-insight { border-left: 3px solid var(--lab-watch); line-height: 1.45; font-size: .88rem; }
+.st-key-lab-nav [role="radiogroup"] { gap: .35rem; flex-wrap: wrap; }
+.st-key-lab-nav [role="radiogroup"] label { background: var(--lab-panel); border: 1px solid var(--lab-border); border-radius: 5px; min-height: 42px; padding: .28rem .65rem; }
+div[data-testid="stRadio"] [role="radiogroup"] { flex-wrap: wrap; }
+@media (max-width: 900px) {
+  .block-container { padding-top: .8rem; }
+  .lab-state-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { min-width: min(100%, 300px) !important; }
+  .lab-week-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+}
+@media (max-width: 600px) {
+  .block-container { padding-left: .75rem; padding-right: .75rem; }
+  .st-key-lab-nav [role="radiogroup"] label { padding: .25rem .45rem; font-size: .8rem; }
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { min-width: 100% !important; }
+  .lab-week { grid-template-columns: 2.7rem 1fr auto; gap: .45rem; }
+  .lab-week-grid { grid-template-columns: 1fr; gap: .35rem; }
+  .lab-day-card { display: grid; grid-template-columns: 3.3rem 1fr; gap: .4rem; }
+  .lab-day-card header { margin: 0; }
+  .lab-day-session { padding: .25rem 0; }
+  .lab-badge { white-space: normal; text-align: center; }
+  .lab-cost { grid-template-columns: 5rem 1fr auto; }
+  [data-testid="stDataFrame"] { overflow-x: auto; }
+}

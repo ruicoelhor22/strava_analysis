@@ -208,26 +208,41 @@ def rolling_load(
 
 
 def analyze_database(
-    database: str | Path | None = None, config_path: str | Path | None = None
+    database: str | Path | None = None,
+    config_path: str | Path | None = None,
+    activity_ids: Iterable[int] | None = None,
 ) -> int:
     init_db(database)
     config = load_athlete_config(config_path)
     computed_at = datetime.now(timezone.utc).isoformat()
+    selected_ids = sorted({int(value) for value in activity_ids}) if activity_ids is not None else None
     with connect(database) as connection:
-        activities = connection.execute("SELECT * FROM activities ORDER BY started_at").fetchall()
+        if selected_ids is None:
+            activities = connection.execute("SELECT * FROM activities ORDER BY started_at").fetchall()
+        elif selected_ids:
+            placeholders = ",".join("?" for _ in selected_ids)
+            activities = connection.execute(
+                f"SELECT * FROM activities WHERE id IN ({placeholders}) ORDER BY started_at",
+                selected_ids,
+            ).fetchall()
+        else:
+            return 0
         connection.execute("BEGIN IMMEDIATE")
         try:
-            connection.execute("DELETE FROM power_curve_results")
-            connection.execute("DELETE FROM derived_activity_metrics")
+            if selected_ids is None:
+                connection.execute("DELETE FROM power_curve_results")
+                connection.execute("DELETE FROM derived_activity_metrics")
+            else:
+                placeholders = ",".join("?" for _ in selected_ids)
+                connection.execute(f"DELETE FROM power_curve_results WHERE activity_id IN ({placeholders})", selected_ids)
+                connection.execute(f"DELETE FROM derived_activity_metrics WHERE activity_id IN ({placeholders})", selected_ids)
             connection.execute("DELETE FROM daily_training_load")
-            derived_rows: list[dict[str, Any]] = []
             for activity in activities:
                 streams = connection.execute(
                     "SELECT * FROM activity_streams WHERE activity_id = ? ORDER BY sequence",
                     (activity["id"],),
                 ).fetchall()
                 metrics, best_power = derive_activity(dict(activity), [dict(row) for row in streams], config)
-                derived_rows.append({**dict(activity), **metrics})
                 _write_metrics(connection, int(activity["id"]), metrics, computed_at)
                 connection.executemany(
                     """INSERT INTO power_curve_results
@@ -235,7 +250,16 @@ def analyze_database(
                        VALUES (?, ?, ?, ?)""",
                     [(activity["id"], duration, watts, computed_at) for duration, watts in best_power.items()],
                 )
-            _write_daily_load(connection, derived_rows, config, computed_at)
+            # Daily fitness/fatigue depends on chronological history, but it can be
+            # rebuilt cheaply from persisted per-activity metrics.  Raw streams and
+            # expensive sport analytics are recalculated only for affected IDs.
+            load_rows = connection.execute(
+                """SELECT a.*, d.selected_load
+                   FROM activities a
+                   LEFT JOIN derived_activity_metrics d ON d.activity_id=a.id
+                   ORDER BY a.started_at"""
+            ).fetchall()
+            _write_daily_load(connection, [dict(row) for row in load_rows], config, computed_at)
             connection.commit()
         except Exception:
             connection.rollback()

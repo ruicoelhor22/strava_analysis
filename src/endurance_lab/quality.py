@@ -87,10 +87,12 @@ def _flags(connection, activity, stream) -> list[str]:
     max_power = max(float(activity["max_power_w"] or 0), float(stream["stream_max_power"] or 0))
     if duration <= 0:
         flags.append("zero_duration")
-    if sport in {"cycling", "running", "swimming"} and distance <= 0:
-        flags.append("zero_distance_unexpected")
     if not activity["started_at"]:
         flags.append("missing_timestamp")
+    if bool(activity["metadata_only"]):
+        return flags
+    if sport in {"cycling", "running", "swimming"} and distance <= 0:
+        flags.append("zero_distance_unexpected")
     if max_hr > 240 or (max_hr and max_hr < 30):
         flags.append("impossible_heart_rate")
     if max_power > 3000:
