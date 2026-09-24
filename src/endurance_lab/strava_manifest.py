@@ -33,6 +33,11 @@ MANIFEST_FIELDS = [
     "error",
     "attempts",
     "last_attempt_at",
+    "discovered_at",
+    "discovery_source",
+    "last_checked",
+    "import_status",
+    "db_activity_id",
 ]
 
 ID_ALIASES = ("strava_id", "activity_id", "id")
@@ -54,6 +59,11 @@ ALIASES = {
     "error": ("error", "error_message"),
     "attempts": ("attempts", "download_attempts"),
     "last_attempt_at": ("last_attempt_at",),
+    "discovered_at": ("discovered_at",),
+    "discovery_source": ("discovery_source",),
+    "last_checked": ("last_checked",),
+    "import_status": ("import_status",),
+    "db_activity_id": ("db_activity_id",),
 }
 
 
@@ -77,6 +87,11 @@ class ManifestRow:
     error: str = ""
     attempts: int = 0
     last_attempt_at: str = ""
+    discovered_at: str = ""
+    discovery_source: str = ""
+    last_checked: str = ""
+    import_status: str = "pending"
+    db_activity_id: str = ""
 
     @classmethod
     def from_mapping(cls, values: dict[str, object]) -> "ManifestRow":
@@ -89,6 +104,8 @@ class ManifestRow:
             kwargs[name] = _integer(value) if name == "attempts" else value
         if not kwargs["download_status"]:
             kwargs["download_status"] = "pending"
+        if not kwargs["import_status"]:
+            kwargs["import_status"] = "pending"
         return cls(**kwargs)
 
     def to_mapping(self) -> dict[str, object]:

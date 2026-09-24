@@ -1,22 +1,20 @@
 athlete:
   timezone: Europe/Lisbon
-  historical_max_hr_bpm: 207
-  aerobic_hr_upper_bpm: 160
+  historical_max_hr_bpm: 200
+  aerobic_hr_upper_bpm: 150
   resting_hr_bpm: null
 
 cycling:
   ftp_history:
     - effective_from: "2020-01-01"
-      watts: 265
+      watts: 250
   power_zone_percentages: [0.0, 0.55, 0.75, 0.90, 1.05, 1.20, 10.0]
 
 heart_rate:
-  zones_bpm: [0, 125, 145, 161, 177, 191, 208]
+  zones_bpm: [0, 120, 140, 155, 170, 185, 201]
 
 running:
-  pb_references:
-    10_km: "00:39:30"
-    half_marathon: "01:31:42"
+  pb_references: {}
 
 load_model:
   fitness_time_constant_days: 42
@@ -32,4 +30,64 @@ analysis:
   decoupling_min_hr_coverage: 0.80
   decoupling_min_moving_ratio: 0.85
   decoupling_max_output_cv: 0.35
+
+strava_sync:
+  lookback_days: 5
+  request_delay_seconds: 2.0
+  retry_limit: 2
+  retry_backoff_seconds: 2.0
+
+google_calendar:
+  enabled: false
+  actual_calendar_name: strava
+  actual_calendar_id: ''
+  planned_calendar_name: Endurance Lab - Planned
+  planned_calendar_id: ''
+  days_ahead: 14
+  actual_lookback_days: 30
+  reminder_minutes: [720]
+  client_file: training_data/auth/google-calendar-client.json
+  token_file: training_data/auth/google-calendar-token.json
+
+coaching:
+  priority_defaults:
+    a: [threshold, vo2, race, long]
+    c: [recovery, optional, easy spin]
+  cost_model:
+    heat_threshold_c: 30
+    endurance_duration_minutes:
+      low: 45
+      high: 150
+    recovery_runway_hours:
+      high_overlap: 24
+      meaningful_overlap: 48
+      generally_workable: 72
+    strength:
+      history_days: 90
+      meaningful_working_sets: 3
+      high_working_sets: 5
+      working_set_load_fraction: 0.60
+      exercise_aliases:
+        lower_body: [leg_press, leg_extension, leg_curl, squat, deadlift, romanian_deadlift, lunge, split_squat, calf, hamstring, quad, glute, hip_thrust]
+        upper_body: [press, chest, flye, pulldown, pull_down, row, curl, triceps, biceps, lateral_raise, shoulder]
+        full_body: [clean, snatch, thruster, burpee]
+        core: [plank, crunch, sit_up, ab_, core]
+  rules:
+    high_stress_recovery_hours:
+      cycling: 36
+      running: 48
+      swimming: 24
+    leg_strength_interference_hours: 36
+    consecutive_training_days_watch: 6
+    recent_volume_ratio_watch: 1.30
+    recent_load_ratio_watch: 1.35
+    duration_reduction_fraction: 0.70
+    minimum_prescribed_minutes: 30
+    subjective_high_threshold: 4
+    automatic_progression: false
+  trends:
+    lookback_days: 84
+    comparison_window_days: 42
+    minimum_sessions: 4
+    meaningful_change_fraction: 0.05
 

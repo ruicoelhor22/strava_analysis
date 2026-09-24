@@ -136,6 +136,7 @@ class PlaywrightTransport:
         try:
             response = self.context.request.get(
                 url,
+                headers=kwargs.get("headers"),
                 timeout=timeout_seconds * 1000,
                 fail_on_status_code=False,
                 max_redirects=20,

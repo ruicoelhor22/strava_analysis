@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "garmin-fit-sdk>=21.195,<22",
+  "openpyxl>=3.1,<4",
   "pandas>=2.0",
   "playwright>=1.49,<2",
   "plotly>=5.18",
