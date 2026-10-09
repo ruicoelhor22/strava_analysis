@@ -66,14 +66,14 @@ The analytics layer turns raw activity data into views such as:
 - running pace and heart-rate economy;
 - long-run durability;
 - swimming pace and lap consistency;
-- strength frequency and exercise history;
+- strength frequency, exercise cards, set-by-set loads, logged volume in kg, and inferred primary muscle groups;
 - best efforts and comparable sessions.
 
 Calculated or estimated values are labelled. When the source data is not sufficient for a metric, the dashboard leaves it unavailable instead of inventing a value.
 
 ### Makes individual activities inspectable
 
-The activity-detail view aligns the recorded streams on a common timeline. It exposes laps, zones, best efforts, session halves, drift, pace, heart rate, cadence, power, elevation, and other available signals. Heart-rate and power-zone charts show their actual bpm and watt ranges, not just zone numbers. Power ranges use the FTP that applied on the activity date, so historical rides retain their original reference.
+The activity-detail view aligns the recorded streams on a common timeline. It exposes laps, zones, best efforts, session halves, drift, pace, heart rate, cadence, power, elevation, and other available signals. Heart-rate and power-zone charts show their actual bpm and watt ranges, not just zone numbers. Power ranges use the FTP that applied on the activity date, so historical rides retain their original reference. Each completed activity also gets a short, automatically generated coach conclusion based on measured training cost and, where reliable, its linked plan execution. Summary-only or low-confidence data is labelled cautiously rather than turned into an invented assessment.
 
 The activity library can be filtered and searched, making the application useful both for long-term trends and for investigating one session.
 
@@ -110,6 +110,8 @@ Some manually created activities and older third-party integrations have no down
 ### Keeps itself current with one sync command
 
 The normal update path is now `python -m endurance_lab sync`. Using the existing signed-in browser profile, it discovers recent activities directly from the athlete's Strava training list, updates the private manifest, downloads only missing exports, imports new data, checks data quality, refreshes affected analytics, matches completed training to the plan, calculates session cost, and updates upcoming coaching prescriptions.
+
+For a manual full refresh, `python -m endurance_lab update` also recalculates recent training, reports weekly volume/completion and upcoming decisions, updates both calendars and restarts the dashboard. Verified activity summaries count toward volume even if their detail export is unresolved. Calendar authorization failures are explicitly reported rather than implied to be successful; existing athlete choices remain protected.
 
 Daily discovery starts five days before the newest locally known activity. This overlap catches delayed uploads and later edits without scanning the full account. Discovery follows every results page needed to exhaust the requested date range and checkpoints each completed page, so an interrupted run can resume. The overlap is configurable through `strava_sync.lookback_days` in the private athlete configuration.
 
@@ -229,7 +231,7 @@ Adherence dimensions remain independent:
 - intensity: easier, close, harder, or unknown;
 - completion: completed, partial, missed, upcoming, unknown, or metadata-only.
 
-The **Plan** view shows the current week, weekly summary, timeline, and session comparison. **Coach** explains current decisions, adherence, training-load context, and coaching flags.
+The **Plan** view shows the current week, weekly summary, timeline, session comparison, and the conclusion for a linked completed activity. **Coach** explains current decisions, adherence, training-load context, and coaching flags.
 
 The available plan commands are:
 
@@ -255,7 +257,17 @@ Summary-only activities are supported through a `metadata_only` marker. They can
 
 ## Adaptive coaching and prescriptions
 
+### Plan lifecycle and athlete control
+
+The coach workbook now has revision history. Normal sync detects changed file content, safely imports valid revisions and explains what changed; failed imports keep the previous plan. Confirmed sessions, drafts, incomplete entries and cancellations are distinguished, and a long-range phase outline is not treated as a finalized workout.
+
+Today, Plan and Coach expose compact athlete controls: accept the recommendation, keep the coach plan, modify, move, skip or clear a choice. Coach instructions, app recommendations, athlete decisions and completed training remain separate and auditable. Material coach changes flag affected choices for review, while historical activity matches are protected. The planned calendar uses the effective workout and excludes uncertain drafts by default.
+
+Training phases and week types now modify the existing conservative coaching rules: protect build/race priorities, respect recovery volume, preserve taper freshness and avoid adding compensatory work. [Plan lifecycle details and limitations](docs/PLAN_LIFECYCLE.md) explain the revision, conflict, calendar and historical-validation behaviour.
+
 The deterministic coaching engine starts from the imported plan and normally keeps it unchanged. It considers only activities before the prescription date, so historical simulations cannot see future training. It describes training context rather than claiming to measure physiological readiness.
+
+Explicit athlete decisions are saved separately from the imported plan and survive automatic reconciliation. A chosen rest day is not treated as missed training, and replacement sessions are matched using their chosen sport and duration. Upper-body gym work is distinguished from leg training: local leg soreness alone does not remove a pull-and-arms session, while high general fatigue still warrants an easier version. Support sessions cannot be moved into the recovery space immediately before a key workout; cancelled strength work does not create an unplanned run. Upper-body work before a key session is kept at maintenance effort, without added leg work or progression.
 
 Completed training is represented by a multidimensional `SessionCost`, not one fatigue number. It keeps systemic, cardiovascular, muscular, sport-specific, intensity, and duration cost separate. A long family ride can therefore remain low physiological cost while a shorter threshold ride is high cost, and a gym session can have low cardiovascular cost but high local lower-body cost.
 
@@ -349,16 +361,39 @@ The following parts are implemented:
 - normalized coaching plans, phases, weeks, sessions, targets, and prescriptions;
 - deterministic planned-versus-actual matching and dimensioned adherence;
 - metadata-only activity support;
-- Training Plan and Coaching Overview dashboard pages;
+- responsive Home, Plan, Activities, Performance, and Coach dashboard pages;
 - date-bounded athlete state and sport-specific performance trends;
 - explainable session/stress classification and workout execution evaluation;
 - conservative adaptive prescriptions and historical backtesting;
 - multidimensional endurance and exercise-aware strength cost classification;
+- evidence-bound automatic conclusions for completed sessions;
 - A/B/C priority protection, recovery runway, and modality-specific interference;
 - structured optional gates and persisted decision traces;
 - Coach dashboard with weekly adaptation view and optional daily check-ins;
 - explainable, non-medical coaching flags;
 - mocked authentication and downloader tests that do not contact live Strava.
+
+The local archive distinguishes known activities from detailed source coverage. A metadata-only activity is still a real, recorded activity: discovery supplies its date, name, sport, and available summary values even when FIT/TCX detail cannot be recovered. An HTML export response is not proof that an export is permanently unavailable. The System & data view and `archive-status` report total known, detailed, and metadata-only activities separately, plus **detailed data coverage**—not "archive completeness."
+
+Data-quality findings are grouped as error, warning, advisory, and info. Ordinary indoor sensor absences are not warnings; GPS gaps that align with elapsed-minus-moving time are treated as recording pauses. Clearly implausible HR, power, and speed samples remain in raw sources but are excluded from derived metrics.
+
+### Normal operation and recovery
+
+```text
+python -m endurance_lab sync
+python -m endurance_lab status
+python -m endurance_lab sync-status
+python -m endurance_lab archive-status
+python -m endurance_lab archive-reconcile --dry-run
+python -m endurance_lab archive-reconcile
+python -m streamlit run dashboard/app.py
+```
+
+An abandoned sync is shown as interrupted once its lock owner is gone. The next normal sync recovers its persisted stage state and can resume local reconciliation, coaching, and calendar work without repeating completed downloads. A live lock is never cleared merely because a long run passed a time threshold. If Strava authentication expires, renew it with `python -m endurance_lab strava-login`, then run `sync` again.
+
+`archive-reconcile` first uses local database and files. `--metadata` performs one bounded historical discovery window; `--retry-pending`, `--retry-ambiguous`, and `--retry-transient` explicitly request small throttled export batches (`--retry-limit` is capped at 25). Do not schedule historical retries blindly. Metadata-only records can contribute known duration, distance, frequency, calendar, and plan matching, but never invent sensor streams. Unconfirmed export detail is a data-depth question, not a missing-activity count or an automatic deployment blocker. Private reconciliation and release reports belong under Git-ignored `training_data/reports/`.
+
+Hosting constraints are recorded in [deployment requirements](docs/deployment_requirements.md). This phase does not deploy the application.
 
 The automated test suite currently covers the core ingestion, analytics, authentication, download, resume, validation, privacy, and reconciliation behavior.
 

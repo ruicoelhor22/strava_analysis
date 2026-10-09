@@ -191,6 +191,7 @@ def _write_plan(path: Path) -> Path:
         "Detailed Prescription": "3x10 min controlled threshold", "Planned Duration (min)": 60,
         "Planned Intensity": "Threshold", "Power Target": "250-270 W",
         "HR Target": "response only", "Strava Activity ID": 123456789,
+        "Status": "Planned",
     }
     for column, header in enumerate(headers, start=1):
         sheet.cell(4, column, values.get(header))
@@ -200,6 +201,7 @@ def _write_plan(path: Path) -> Path:
         "Sport": "WeightTraining", "Workout Code": "GYM-A", "Planned Session": "Gym A",
         "Detailed Prescription": "Controlled full-body strength", "Planned Duration (min)": 45,
         "Planned Intensity": "RPE 7",
+        "Status": "Planned",
     }
     for column, header in enumerate(headers, start=1):
         sheet.cell(5, column, values.get(header))

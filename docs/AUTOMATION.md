@@ -2,6 +2,12 @@
 
 Endurance Lab can run unattended under the current Windows user. It does not require an administrator account.
 
+## One manual update trigger
+
+Run `python -m endurance_lab update` from the repository. It performs fresh Strava discovery rather than only resuming an older calendar checkpoint, retries detail exports, retains verified activity summaries when exports are unresolved, recalculates the last 35 days, matches completed sessions, reviews affected/upcoming coaching, synchronizes actual and planned calendars and restarts the dashboard. Refresh the phone page afterwards. Extra actual activities count toward volume without being falsely matched to a different planned sport.
+
+The output reports actual hours and completion counts for the previous/current weeks, plus explicit calendar failures. An unresolved detail export stays retryable; summary duration is not sensor data. `update` does not launch an interactive sign-in automatically. If Google reports expired/revoked authorization, run `python -m endurance_lab calendar-login` once, then repeat `python -m endurance_lab update`. Until authorization succeeds the result is PARTIAL, not a completed calendar update. Normal scheduled `sync` remains incremental and does not restart the dashboard.
+
 ## What is installed
 
 - `Endurance Lab Sync` is a Windows Task Scheduler task that runs the normal sync every 60 minutes while the user is logged in.
@@ -72,6 +78,8 @@ python -m endurance_lab calendar-activities --from 2026-09-01 --to 2026-09-30
 
 Calendar synchronization stores the Google event ID for each planned session. Unchanged prescriptions are skipped, changed prescriptions update the same event, and removed future prescriptions remove their linked event.
 
+Planned-event sync also reconciles the previous seven days, so a late rest confirmation or changed workout corrects an already-passed calendar date. This window is configurable with `google_calendar.planned_lookback_days`. The calendar uses the same serialized effective workout as the app, including its duration and structure.
+
 ## Logs and recovery
 
 - `training_data/logs/scheduler.log`: scheduled command output
@@ -82,3 +90,5 @@ Calendar synchronization stores the Google event ID for each planned session. Un
 Launcher logs rotate at 5 MB. The database contains sync-stage and calendar-link history. The existing pipeline lock prevents scheduled and manual syncs from changing the manifest or database simultaneously.
 
 The scheduled task runs in the interactive user session. It therefore runs while the Windows user is signed in, including when the screen is locked, but not after signing out or shutting down the computer.
+
+If a sync process exits unexpectedly, `python -m endurance_lab sync-status` reports its last completed stage and shows an abandoned run as interrupted once the lock owner is gone. The next normal `sync` holds the exclusive lock, finalizes the old record from stage evidence, and resumes unfinished local reconciliation/coaching/calendar work when possible. It does not repeat completed Strava download/import stages for that recovery. A genuinely live lock is never cleared just because a run is long. Use `python -m endurance_lab archive-status` to inspect historical export resolution separately from daily sync health.

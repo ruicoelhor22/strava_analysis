@@ -33,7 +33,7 @@ def parse_strength_json(
     source_id = source_activity_id_from_filename(source.name)
     creator = payload.get("creator") if isinstance(payload.get("creator"), dict) else {}
     provider = str(creator.get("name") or payload.get("provider") or "json")
-    sets = _parse_sets(payload.get("sets"), started_at)
+    sets = _parse_sets(payload.get("sets"), started_at, default_unit="kg" if provider.lower() == "hevy" else None)
     activity = ParsedActivity(
         stable_id=f"strava:{source_id}" if source_id else f"json:{sha256}:0",
         source_activity_id=source_id,
@@ -58,7 +58,7 @@ def parse_strength_json(
     return [finalize_activity(activity)]
 
 
-def _parse_sets(value: Any, activity_start: datetime) -> list[StrengthSet]:
+def _parse_sets(value: Any, activity_start: datetime, default_unit: str | None = None) -> list[StrengthSet]:
     if value is None:
         return []
     if not isinstance(value, list):
@@ -79,8 +79,7 @@ def _parse_sets(value: Any, activity_start: datetime) -> list[StrengthSet]:
                 set_number=counts[exercise_name],
                 repetitions=_integer(_first_present(raw, "repetitions", "reps")),
                 load_value=_number(raw.get("weight") if "weight" in raw else raw.get("load")),
-                # The observed Hevy export has no unit field. Preserve the number without guessing kg/lb.
-                load_unit=_text(raw.get("weight_unit") or raw.get("unit")),
+                load_unit=_text(raw.get("weight_unit") or raw.get("unit")) or default_unit,
                 started_at=_datetime(raw.get("start_time")) or activity_start,
                 duration_seconds=_number(_first_present(raw, "duration", "duration_seconds")),
                 metadata={

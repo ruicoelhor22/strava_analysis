@@ -86,4 +86,5 @@ class PlanImportSummary:
     date_end: date
     sports: dict[str, int]
     warnings: tuple[str, ...] = ()
-
+    revision_id: int | None = None
+    changes: tuple[dict[str, Any], ...] = ()

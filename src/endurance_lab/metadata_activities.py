@@ -53,6 +53,7 @@ def upsert_metadata_activity(
         ).fetchone()
         if existing and not int(existing["metadata_only"]):
             return int(existing["id"])
+        candidate_id = None if existing else _matching_detailed_candidate(connection, activity)
         connection.execute(
             """INSERT OR IGNORE INTO imports (
                    source_filename, sha256, source_format, source, raw_path,
@@ -63,6 +64,22 @@ def upsert_metadata_activity(
         import_id = int(connection.execute(
             "SELECT id FROM imports WHERE sha256 = ?", (digest,)
         ).fetchone()[0])
+        if candidate_id is not None:
+            connection.execute(
+                """UPDATE activities SET source_activity_id=?, stable_id=?, identity_key=?
+                   WHERE id=? AND source_activity_id IS NULL AND metadata_only=0""",
+                (str(activity.source_activity_id), f"strava:{activity.source_activity_id}",
+                 f"strava:{activity.source_activity_id}", candidate_id),
+            )
+            connection.execute(
+                """INSERT OR IGNORE INTO activity_sources (
+                       activity_id, import_id, source_format, source_filename, raw_path, sha256,
+                       source_activity_id, quality_score, selected, metadata_json, imported_at
+                   ) VALUES (?, ?, 'metadata', ?, ?, ?, ?, 1, 0, ?, ?)""",
+                (candidate_id, import_id, filename, activity.source_reference, digest,
+                 str(activity.source_activity_id), json.dumps(payload, ensure_ascii=False), now),
+            )
+            return candidate_id
         if existing:
             activity_id = int(existing["id"])
             connection.execute(
@@ -97,3 +114,25 @@ def upsert_metadata_activity(
         )
     return activity_id
 
+
+def _matching_detailed_candidate(connection, activity: MetadataActivity) -> int | None:
+    if activity.duration_seconds is None or activity.duration_seconds <= 0:
+        return None
+    sport = normalize_plan_sport(activity.sport)
+    matches = connection.execute(
+        """SELECT id,elapsed_seconds,distance_m FROM activities
+           WHERE source_activity_id IS NULL AND metadata_only=0 AND sport=?
+             AND ABS((julianday(started_at)-julianday(?))*86400.0) <= 5""",
+        (sport, activity.started_at.isoformat()),
+    ).fetchall()
+    eligible = []
+    for row in matches:
+        elapsed = row["elapsed_seconds"]
+        if elapsed is None or abs(float(elapsed) - activity.duration_seconds) > max(10, activity.duration_seconds * 0.02):
+            continue
+        local_distance = row["distance_m"]
+        if activity.distance_m is not None and local_distance is not None:
+            if abs(float(local_distance) - activity.distance_m) > max(100, activity.distance_m * 0.02):
+                continue
+        eligible.append(int(row["id"]))
+    return eligible[0] if len(eligible) == 1 else None

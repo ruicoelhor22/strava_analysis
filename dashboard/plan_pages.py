@@ -10,8 +10,10 @@ import streamlit as st
 from dashboard._shared import COLORS, decision_pill, format_duration, page_intro, section_header, sport_marker, style_figure
 from endurance_lab.coaching import coaching_flags
 from endurance_lab.db import connect
-from endurance_lab.plan_adherence import plan_status, planned_sessions, weekly_adherence
+from endurance_lab.plan_adherence import plan_status, planned_sessions, weekly_adherence, actual_training_days
 from endurance_lab.queries import activities, daily_load, power_history
+from endurance_lab.session_conclusion import load_session_conclusion
+from dashboard.plan_controls import revision_panel, session_controls
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -39,6 +41,10 @@ def _actual_activities(start: date, end: date) -> pd.DataFrame:
     return activities(start=start, end=end + timedelta(days=1))
 
 
+def _select_plan_week(monday: date) -> None:
+    st.session_state["plan_week_start"] = monday
+
+
 def training_plan_page() -> None:
     page_intro(
         "Planned · prescribed · completed",
@@ -49,25 +55,43 @@ def training_plan_page() -> None:
     if not status.get("plan"):
         st.info("No coaching plan has been imported yet.")
         return
+    revision_panel()
     today = date.today()
-    monday = today - timedelta(days=today.weekday())
+    this_monday = today - timedelta(days=today.weekday())
+    first_date = date.fromisoformat(status["plan"]["date_start"])
+    last_date = date.fromisoformat(status["plan"]["date_end"])
+    first_monday = min(first_date - timedelta(days=first_date.weekday()), this_monday)
+    last_monday = max(last_date - timedelta(days=last_date.weekday()), this_monday)
+    if "plan_week_start" not in st.session_state:
+        st.session_state["plan_week_start"] = this_monday
+    monday = max(first_monday, min(st.session_state["plan_week_start"], last_monday))
+    navigation = st.columns(3)
+    navigation[0].button("← Previous week", disabled=monday <= first_monday, width="stretch",
+                         on_click=_select_plan_week, args=(monday - timedelta(days=7),))
+    navigation[1].button("This week", width="stretch", on_click=_select_plan_week, args=(this_monday,))
+    navigation[2].button("Next week →", disabled=monday >= last_monday, width="stretch",
+                         on_click=_select_plan_week, args=(monday + timedelta(days=7),))
+    st.session_state["plan_week_start"] = monday
     sunday = monday + timedelta(days=6)
+    st.caption(f"{monday.strftime('%d %b %Y')} – {sunday.strftime('%d %b %Y')}")
     current = _sessions(monday, sunday)
-    week = status.get("current_week")
+    actual_days = actual_training_days(start=monday,end=sunday)
+    week = next((item for item in _weeks(monday, sunday) if item["week_start"] == monday.isoformat()), None)
+    week_label = "Current week" if monday == this_monday else "Past week" if monday < this_monday else "Upcoming week"
 
     if week:
         with st.container(border=True):
             top, badge = st.columns([4, 1])
-            top.markdown(f"**{week.get('phase') or 'Current block'}** · {week.get('week_type') or 'Unspecified week'}")
-            badge.markdown(decision_pill("Current week", "good"), unsafe_allow_html=True)
+            top.markdown(f"**{week.get('phase') or 'Training block'}** · {week.get('week_type') or 'Unspecified week'}")
+            badge.markdown(decision_pill(week_label, "good" if monday == this_monday else "neutral"), unsafe_allow_html=True)
             completion = week["completed_sessions"] / week["planned_sessions"] if week["planned_sessions"] else 0
             st.progress(completion)
-            st.caption(f"{week['completed_sessions']} of {week['planned_sessions']} sessions linked · {completion:.0%} complete")
+            st.caption(f"{week['completed_sessions']} of {week['planned_sessions']} planned sessions linked · {completion:.0%} plan completion · {sum(len(rows) for rows in actual_days.values())} actual activities recorded")
 
         cols = st.columns(4)
         cols[0].metric("Planned time", format_duration(week["planned_duration_seconds"]))
         cols[1].metric(
-            "Completed time",
+            "Actual training time",
             format_duration(week["actual_duration_seconds"]),
             f"{week['actual_duration_seconds'] / week['planned_duration_seconds']:.0%} of plan" if week["planned_duration_seconds"] else None,
             delta_color="off",
@@ -92,25 +116,47 @@ def training_plan_page() -> None:
             f"{week['strength_sessions_planned']} completed."
         )
 
-    section_header("Current week", "Original plan, current prescription and completion at a glance.")
-    if not current:
+    section_header(week_label, "Original plan, current prescription and completion at a glance.")
+    if not current and not actual_days:
         st.caption("No explicit sessions are prescribed for this week.")
     else:
-        _week_grid(current, monday, today)
+        _week_grid(current, monday, today, actual_days=actual_days)
         with st.expander("Full week table"):
             st.dataframe(_session_table(current), width="stretch", hide_index=True)
+
+    with connect() as connection:
+        extra_rows=connection.execute("""SELECT a.id,a.name,a.sport,a.started_at,COALESCE(NULLIF(a.moving_seconds,0),a.elapsed_seconds,0) AS duration,
+                  p.title AS candidate_title,p.planned_date AS candidate_date
+           FROM activities a LEFT JOIN planned_activity_matches candidate ON candidate.activity_id=a.id AND candidate.match_method='reordered_intent' AND candidate.is_selected=0
+           LEFT JOIN planned_sessions p ON p.id=candidate.planned_session_id
+           WHERE substr(a.started_at,1,10) BETWEEN ? AND ? AND NOT EXISTS
+             (SELECT 1 FROM planned_activity_matches m WHERE m.activity_id=a.id AND m.is_selected=1)
+           ORDER BY a.started_at""",(monday.isoformat(),sunday.isoformat())).fetchall()
+    if extra_rows:
+        from endurance_lab.plan_matching import extra_activity_ids
+        confirmed_extras=extra_activity_ids()
+        section_header('Training outside the original order','Included in actual volume and recovery costs; not automatically credited as a different workout.')
+        for extra in extra_rows:
+            with st.container(border=True):
+                st.write(f"{extra['started_at'][:10]} · {extra['name']} · {format_duration(extra['duration'])}")
+                if extra['id'] in confirmed_extras:
+                    st.caption('Confirmed extra training · completed. It adds to actual volume and recovery costs without replacing any planned session.')
+                elif extra['candidate_title']:
+                    st.caption(f"Endurance-purpose match: {extra['candidate_title']} ({extra['candidate_date']}). Could be performed early or additional training; the future session stays planned until replacement is confirmed.")
+                else:
+                    st.caption('Extra actual training. Its cost informs the remaining week even without a planned-session completion link.')
 
     section_header("Plan timeline", "Scan completion state by sport, then inspect the underlying schedule.")
     weeks_back = st.radio(
         "Window", ["4 weeks", "12 weeks", "Full plan"], index=1, horizontal=True
     )
     if weeks_back == "4 weeks":
-        start, end = today - timedelta(days=14), today + timedelta(days=14)
+        start, end = monday - timedelta(days=14), sunday + timedelta(days=14)
     elif weeks_back == "Full plan":
         start = date.fromisoformat(status["plan"]["date_start"])
         end = date.fromisoformat(status["plan"]["date_end"])
     else:
-        start, end = today - timedelta(days=28), today + timedelta(days=56)
+        start, end = monday - timedelta(days=28), sunday + timedelta(days=56)
     timeline = _sessions(start, end)
     if timeline:
         frame = pd.DataFrame(timeline)
@@ -164,10 +210,10 @@ def training_plan_page() -> None:
     if labels:
         label_list = list(labels)
         upcoming_index = next(
-            (index for index, item in enumerate(all_sessions) if item["planned_date"] >= today.isoformat()),
+            (index for index, item in enumerate(all_sessions) if item["planned_date"] >= monday.isoformat()),
             max(0, len(label_list) - 1),
         )
-        selected = labels[st.selectbox("Planned session", label_list, index=upcoming_index)]
+        selected = labels[st.selectbox("Planned session", label_list, index=upcoming_index, key=f"plan_session_{monday.isoformat()}")]
         _session_detail(selected)
 
 
@@ -272,7 +318,8 @@ def _session_table(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _week_grid(items: list[dict], monday: date, today: date) -> None:
+def _week_grid(items: list[dict], monday: date, today: date, *, actual_days=None) -> None:
+    actual_days=actual_days if actual_days is not None else actual_training_days(start=monday,end=monday+timedelta(days=6))
     ids = [int(item["id"]) for item in items]
     prescriptions: dict[int, dict] = {}
     if ids:
@@ -281,7 +328,7 @@ def _week_grid(items: list[dict], monday: date, today: date) -> None:
             prescriptions = {
                 int(row["planned_session_id"]): dict(row)
                 for row in connection.execute(
-                    f"SELECT planned_session_id, title, action, duration_seconds "
+                    f"SELECT planned_session_id, sport, title, action, duration_seconds "
                     f"FROM workout_prescriptions WHERE status='active' "
                     f"AND planned_session_id IN ({placeholders})", ids
                 )
@@ -297,21 +344,32 @@ def _week_grid(items: list[dict], monday: date, today: date) -> None:
             prescribed = prescriptions.get(int(item["id"])) or {}
             state = str(item["completion_state"]).replace("_", " ").title()
             actual = item.get("actual_name") or item.get("workbook_actual", {}).get("Actual Session")
-            title = str(prescribed.get("title") or item["title"])
-            action = str(prescribed.get("action") or "KEEP").replace("_", " ").title()
-            detail = f"{format_duration(prescribed.get('duration_seconds') or item.get('planned_duration_seconds'))} · {action}"
+            title = str(item['title'])
+            action = str((item.get('athlete_decision') or {}).get('action') or prescribed.get('action') or 'KEEP').replace('_',' ').title()
+            detail = f"{format_duration(item.get('planned_duration_seconds'))} · {action} · {item.get('effective_source','COACH')}"
+            if item.get('lifecycle_state') in {'draft','incomplete'} and not item.get('athlete_decision'):
+                detail = item['lifecycle_state'].upper() + ' · Workout not finalized by coach'
+            if item.get('needs_review'): detail += ' · DECISION NEEDS REVIEW'
             if actual:
                 detail += f" · Done: {actual}"
             sessions.append(
-                '<div class="lab-day-session">'
+                f'<div class="lab-day-session" data-lifecycle="{escape(item.get("lifecycle_state","confirmed"))}">'
                 f'<strong>{escape(sport_marker(item["sport"]))} · {escape(title)}</strong>'
                 f'<small>{escape(detail)}</small><small>{escape(state)}'
                 f' · {escape(str(item.get("priority") or "No priority"))}</small></div>'
             )
+        shown_ids={item.get('activity_id') for item in by_day.get(day.isoformat(),[])}
+        for actual in actual_days.get(day.isoformat(),[]):
+            if actual['id'] in shown_ids: continue
+            role='Extra training' if actual['role']=='extra' else 'Performed on this day' if actual['linked_session_id'] else 'Unplanned training'
+            detail=f"{format_duration(actual['duration_seconds'])} · Done · {role}"
+            if actual.get('distance_m'): detail+=f" · {actual['distance_m']/1000:.1f} km"
+            if actual.get('metadata_only'): detail+=' · Summary only'
+            sessions.append(f'<div class="lab-day-session" data-lifecycle="completed"><strong>{escape(sport_marker(actual["sport"]))} · {escape(actual["name"] or "Recorded activity")}</strong><small>{escape(detail)}</small><small>Completed actual training</small></div>')
         cards.append(
             f'<div class="lab-day-card {"today" if day == today else ""}">'
             f'<header>{day.strftime("%a")} {day.day:02d}</header>'
-            f'<div>{"".join(sessions) if sessions else "<span class=lab-sub>No planned work</span>"}</div></div>'
+            f'<div>{"".join(sessions) if sessions else "<span class=lab-sub>No planned session or recorded activity</span>"}</div></div>'
         )
     st.markdown('<div class="lab-week-grid">' + "".join(cards) + '</div>', unsafe_allow_html=True)
 
@@ -336,6 +394,7 @@ def _open_activity(activity_id: int) -> None:
 
 
 def _session_detail(item: dict) -> None:
+    session_controls(int(item['id']),key_prefix='plan')
     left, right = st.columns(2)
     with left:
         st.markdown("#### Planned")
@@ -360,6 +419,12 @@ def _session_detail(item: dict) -> None:
             )
             if item.get("activity_id"):
                 st.caption(f"Activity #{item['activity_id']} · {item.get('match_status')} match · score {item.get('match_score', 0):.0f}")
+                conclusion = load_session_conclusion(int(item["activity_id"]))
+                if conclusion:
+                    st.markdown("**Coach conclusion**")
+                    st.write(f"{conclusion.headline} {conclusion.explanation}")
+                    if conclusion.caveat:
+                        st.caption(conclusion.caveat)
                 st.button(
                     "Open activity detail",
                     key=f"open-activity-{item['id']}",

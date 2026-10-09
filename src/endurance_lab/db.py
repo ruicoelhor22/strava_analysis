@@ -326,6 +326,69 @@ CREATE TABLE IF NOT EXISTS workout_prescriptions (
     UNIQUE(planned_session_id, status)
 );
 
+CREATE TABLE IF NOT EXISTS training_decisions (
+    planned_session_id INTEGER PRIMARY KEY REFERENCES planned_sessions(id) ON DELETE CASCADE,
+    workout_json TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plan_revisions (
+    id INTEGER PRIMARY KEY,
+    plan_id INTEGER NOT NULL REFERENCES training_plans(id),
+    imported_at TEXT NOT NULL,
+    source_filename TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    date_start TEXT NOT NULL,
+    date_end TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    session_count INTEGER NOT NULL,
+    change_summary_json TEXT NOT NULL DEFAULT '[]',
+    missing_dates_json TEXT NOT NULL DEFAULT '[]',
+    reviewed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS plan_session_versions (
+    revision_id INTEGER NOT NULL REFERENCES plan_revisions(id),
+    planned_session_id INTEGER NOT NULL REFERENCES planned_sessions(id),
+    snapshot_json TEXT NOT NULL,
+    PRIMARY KEY(revision_id, planned_session_id)
+);
+CREATE TABLE IF NOT EXISTS plan_session_lifecycle (
+    planned_session_id INTEGER PRIMARY KEY REFERENCES planned_sessions(id),
+    revision_id INTEGER REFERENCES plan_revisions(id),
+    state TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    confirmed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS athlete_decision_meta (
+    planned_session_id INTEGER PRIMARY KEY REFERENCES planned_sessions(id),
+    action TEXT NOT NULL DEFAULT 'MODIFY',
+    source TEXT NOT NULL DEFAULT 'athlete',
+    updated_at TEXT NOT NULL,
+    based_revision_id INTEGER REFERENCES plan_revisions(id),
+    needs_review INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS athlete_decision_history (
+    id INTEGER PRIMARY KEY,
+    planned_session_id INTEGER NOT NULL REFERENCES planned_sessions(id),
+    created_at TEXT NOT NULL,
+    action TEXT NOT NULL,
+    source TEXT NOT NULL,
+    previous_json TEXT,
+    resulting_json TEXT,
+    note TEXT,
+    based_revision_id INTEGER REFERENCES plan_revisions(id)
+);
+CREATE TABLE IF NOT EXISTS plan_events (
+    id INTEGER PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    planned_session_id INTEGER REFERENCES planned_sessions(id),
+    revision_id INTEGER REFERENCES plan_revisions(id),
+    payload_json TEXT NOT NULL,
+    dedup_key TEXT UNIQUE
+);
+
 CREATE TABLE IF NOT EXISTS activity_classifications (
     activity_id INTEGER PRIMARY KEY REFERENCES activities(id) ON DELETE CASCADE,
     classification TEXT NOT NULL,

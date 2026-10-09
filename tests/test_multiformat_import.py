@@ -23,7 +23,7 @@ def test_strength_json_parses_observed_hevy_shape():
     assert strength.strength_sets[0].exercise_name == "LAT_PULLDOWN"
     assert strength.strength_sets[0].repetitions == 10
     assert strength.strength_sets[0].load_value == 70
-    assert strength.strength_sets[0].load_unit is None
+    assert strength.strength_sets[0].load_unit == "kg"
 
 
 def test_strength_json_allows_missing_optional_fields():
@@ -34,6 +34,17 @@ def test_strength_json_allows_missing_optional_fields():
     assert strength.sport == "strength"
     assert strength.elapsed_seconds is None
     assert strength.strength_sets == []
+
+
+def test_strength_json_preserves_explicit_load_unit():
+    root = _test_dir()
+    source = root / "explicit.json"
+    source.write_text(json.dumps({
+        "start_time": "2026-01-15T07:00:00Z",
+        "creator": {"name": "Hevy"},
+        "sets": [{"exercise_type": "ROW_GENERIC", "repetitions": 10, "weight": 100, "weight_unit": "lb"}],
+    }), encoding="utf-8")
+    assert parse_strength_json(source)[0].strength_sets[0].load_unit == "lb"
 
 
 def test_mixed_import_continues_after_malformed_and_unsupported(monkeypatch):
@@ -74,7 +85,7 @@ def test_tcx_then_richer_fit_upgrades_without_duplicate(monkeypatch):
         assert connection.execute("SELECT COUNT(*) FROM activity_streams").fetchone()[0] == 121
 
 
-def test_strength_sets_are_stored_without_invented_units(monkeypatch):
+def test_hevy_strength_sets_use_confirmed_kg_units(monkeypatch):
     root = _test_dir()
     source = _write_strength_json(root / "strength.json")
     database = root / "strength.sqlite3"
@@ -84,7 +95,7 @@ def test_strength_sets_are_stored_without_invented_units(monkeypatch):
         row = connection.execute("SELECT * FROM strength_sets ORDER BY id LIMIT 1").fetchone()
     assert row["exercise_name"] == "LAT_PULLDOWN"
     assert row["load_value"] == 70
-    assert row["load_unit"] is None
+    assert row["load_unit"] == "kg"
 
 
 def test_quality_report_summarizes_formats_coverage_and_flags(monkeypatch):

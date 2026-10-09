@@ -53,7 +53,12 @@ class SyncLock:
         except Exception:
             started, pid = datetime.fromtimestamp(0, timezone.utc), 0
         age = datetime.now(timezone.utc) - started.astimezone(timezone.utc)
-        if age <= self.stale_after and _pid_exists(pid):
+        # A live owner is never stale merely because a long sync passed a clock threshold.
+        if _pid_exists(pid):
+            return
+        # Avoid deleting a lock that another process has only just created but
+        # has not finished writing yet.
+        if age <= timedelta(seconds=5):
             return
         self.path.unlink(missing_ok=True)
 
@@ -64,5 +69,19 @@ def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        return True  # Another user's live process may be inaccessible.
     except OSError:
         return False
+
+
+def lock_owner(path: str | Path = "training_data/sync.lock") -> tuple[int | None, bool]:
+    """Return the recorded owner and whether it is alive, without changing the lock."""
+    target = project_path(path)
+    if not target.exists():
+        return None, False
+    try:
+        pid = int(json.loads(target.read_text(encoding="utf-8")).get("pid") or 0)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None, False
+    return pid or None, _pid_exists(pid)

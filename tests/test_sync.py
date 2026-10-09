@@ -12,7 +12,8 @@ from endurance_lab.db import connect, init_db
 from endurance_lab.strava_discovery import DiscoveryError, StravaDiscovery
 from endurance_lab.strava_manifest import ManifestRow, load_manifest, save_manifest
 from endurance_lab.sync_lock import SyncAlreadyRunning, SyncLock
-from endurance_lab.sync_pipeline import SyncOptions, SyncPipeline
+import endurance_lab.sync_lock as sync_lock_module
+from endurance_lab.sync_pipeline import SyncOptions, SyncPipeline, sync_status
 import endurance_lab.sync_pipeline as sync_pipeline_module
 
 
@@ -113,6 +114,18 @@ def test_sync_lock_rejects_concurrent_process_and_recovers_stale_lock():
     with SyncLock(lock_path):
         assert lock_path.exists()
     assert not lock_path.exists()
+
+
+def test_old_lock_with_live_owner_is_not_deleted(monkeypatch):
+    root = Path("training_data") / "test-sync" / uuid4().hex
+    lock_path = root / "sync.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text('{"pid": 1234, "started_at": "2000-01-01T00:00:00+00:00"}', encoding="utf-8")
+    monkeypatch.setattr(sync_lock_module, "_pid_exists", lambda pid: pid == 1234)
+    with pytest.raises(SyncAlreadyRunning):
+        with SyncLock(lock_path):
+            pass
+    assert lock_path.exists()
 
 
 def test_full_pipeline_metadata_fallback_and_second_run_are_idempotent(monkeypatch):
@@ -233,6 +246,148 @@ def test_coaching_failure_resumes_without_discovery_download_or_import(monkeypat
     assert second.run_id == first.run_id
     with connect(database) as connection:
         assert connection.execute("SELECT COUNT(1) FROM activities").fetchone()[0] == 1
+
+
+def test_abandoned_run_resumes_local_stages_without_strava(monkeypatch):
+    root, database, manifest = _paths()
+    save_manifest([], manifest)
+    with connect(database) as connection:
+        run_id = connection.execute(
+            "INSERT INTO sync_runs(started_at,trigger,status,requested_from,requested_to) VALUES ('2026-09-24T08:00:00+00:00','test','running','2026-09-24','2026-09-24')"
+        ).lastrowid
+        for stage in ("authentication", "discovery", "downloads", "import", "quality", "analytics"):
+            connection.execute(
+                "INSERT INTO sync_run_stages(sync_run_id,stage,status,started_at,finished_at) VALUES (?,?, 'success','2026-09-24T08:00:00+00:00','2026-09-24T08:01:00+00:00')",
+                (run_id, stage),
+            )
+        connection.commit()
+    assert sync_status(database, manifest, root / "import")["last_run"]["status"] == "interrupted"
+
+    def no_transport(*args, **kwargs):
+        raise AssertionError("Resuming local stages must not contact Strava")
+
+    pipeline = SyncPipeline(transport_factory=no_transport)
+    result = pipeline.run(SyncOptions(
+        date_from=date(2026, 9, 24), date_to=date(2026, 9, 24),
+        manifest=manifest, downloads=root / "import", database=database,
+        skip_calendar=True,
+    ))
+    assert result.status == "success" and result.run_id == run_id
+    with connect(database) as connection:
+        row = connection.execute("SELECT status,finished_at FROM sync_runs WHERE id=?", (run_id,)).fetchone()
+        assert row["status"] == "success" and row["finished_at"]
+        assert connection.execute("SELECT status FROM sync_run_stages WHERE sync_run_id=? AND stage='calendar'", (run_id,)).fetchone()[0] == "skipped"
+
+
+def test_abandoned_run_with_all_stages_completed_is_finalized_from_checkpoints():
+    _root, database, _manifest = _paths()
+    with connect(database) as connection:
+        run_id = connection.execute(
+            "INSERT INTO sync_runs(started_at,trigger,status,requested_from,requested_to) VALUES ('2026-09-24T08:00:00+00:00','test','running','2026-09-24','2026-09-24')"
+        ).lastrowid
+        for stage in ("authentication", "discovery", "downloads", "import", "quality",
+                      "analytics", "reconciliation", "coaching", "calendar"):
+            checkpoint = '{"new": 2}' if stage == "discovery" else '{}'
+            connection.execute(
+                """INSERT INTO sync_run_stages(sync_run_id,stage,status,started_at,finished_at,checkpoint_json)
+                   VALUES (?,?,'success','2026-09-24T08:00:00+00:00','2026-09-24T08:01:00+00:00',?)""",
+                (run_id, stage, checkpoint),
+            )
+        connection.commit()
+    assert sync_pipeline_module._recover_abandoned_runs(database) == [run_id]
+    with connect(database) as connection:
+        row = connection.execute("SELECT status,discovered_count,summary_json FROM sync_runs WHERE id=?", (run_id,)).fetchone()
+        assert row["status"] == "success" and row["discovered_count"] == 2
+        assert json.loads(row["summary_json"])["discovery"]["new"] == 2
+
+
+def test_sync_finalizes_when_interrupted_after_analytics(monkeypatch):
+    root, database, manifest = _paths()
+    transport = DiscoveryTransport(
+        [_page([_activity("10000001", "2026-09-24T08:00:00+0000")], 1, 1)],
+        [FakeResponse(404), FakeResponse(404)],
+    )
+
+    class Factory:
+        def __init__(self, profile, headless): pass
+        def __enter__(self): return transport
+        def __exit__(self, *args): return None
+
+    auth = lambda context: type("Auth", (), {"authenticated": True, "reason": "test"})()
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(sync_pipeline_module, "reconcile", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        SyncPipeline(transport_factory=Factory, authentication_checker=auth).run(SyncOptions(
+            date_from=date(2026, 9, 24), date_to=date(2026, 9, 24),
+            manifest=manifest, downloads=root / "import", database=database,
+            skip_calendar=True,
+        ))
+    with connect(database) as connection:
+        row = connection.execute("SELECT status,finished_at FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        assert row["status"] == "interrupted" and row["finished_at"]
+
+
+def test_calendar_failure_is_persisted_and_finalizes_partial(monkeypatch):
+    root, database, manifest = _paths()
+    transport = DiscoveryTransport(
+        [_page([_activity("10000001", "2026-09-24T08:00:00+0000")], 1, 1)],
+        [FakeResponse(404), FakeResponse(404)],
+    )
+
+    class Factory:
+        def __init__(self, profile, headless): pass
+        def __enter__(self): return transport
+        def __exit__(self, *args): return None
+
+    auth = lambda context: type("Auth", (), {"authenticated": True, "reason": "test"})()
+    monkeypatch.setattr(sync_pipeline_module, "calendar_enabled", lambda: True)
+    monkeypatch.setattr(sync_pipeline_module, "sync_google_calendar", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    result = SyncPipeline(transport_factory=Factory, authentication_checker=auth).run(SyncOptions(
+        date_from=date(2026, 9, 24), date_to=date(2026, 9, 24),
+        manifest=manifest, downloads=root / "import", database=database, delay_seconds=0,
+    ))
+    assert result.status == "partial" and result.calendar["error_code"] == "CALENDAR_ERROR"
+    with connect(database) as connection:
+        assert connection.execute("SELECT status FROM sync_run_stages WHERE stage='calendar'").fetchone()[0] == "failed"
+        run = connection.execute("SELECT status,finished_at FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        assert run["status"] == "partial" and run["finished_at"]
+
+
+def test_verified_summary_counts_volume_even_when_detail_export_is_html():
+    root,database,manifest=_paths()
+    from endurance_lab.strava_manifest import save_manifest
+    row=ManifestRow('10000009',activity_date='2026-10-04T09:30:00+00:00',sport='Padel',name='Padel 1h',duration_seconds='3600',distance_m='2000',discovery_source='strava_training_activities',download_status='failed',result_status='original: HTML response is not an activity export; tcx: HTML response is not an activity export')
+    save_manifest([row],manifest)
+    ids,summary=sync_pipeline_module._import_and_fallback(manifest,root/'import',{'10000009'},database)
+    assert len(ids)==1 and summary['metadata_only']==1
+    with connect(database) as connection:
+        actual=connection.execute("SELECT metadata_only,elapsed_seconds FROM activities WHERE source_activity_id='10000009'").fetchone()
+        assert tuple(actual)==(1,3600)
+    stored=load_manifest(manifest)[0]
+    assert stored.download_status=='failed' and stored.import_status=='imported'
+    sync_pipeline_module._import_and_fallback(manifest,root/'import',{'10000009'},database)
+    with connect(database) as connection:
+        assert connection.execute('SELECT count(*) FROM activities').fetchone()[0]==1
+
+
+def test_per_event_calendar_errors_are_not_reported_as_success(monkeypatch):
+    from types import SimpleNamespace
+    root,database,_=_paths()
+    summary=dict(created=0,updated=0,unchanged=0,errors=1)
+    monkeypatch.setattr(sync_pipeline_module,'calendar_enabled',lambda:True)
+    monkeypatch.setattr(sync_pipeline_module,'sync_google_calendar',lambda *a,**k:SimpleNamespace(to_dict=lambda:summary))
+    monkeypatch.setattr(sync_pipeline_module,'sync_activity_calendar',lambda *a,**k:SimpleNamespace(to_dict=lambda:{**summary,'errors':0}))
+    result=sync_pipeline_module.SyncResult()
+    calendar=sync_pipeline_module._update_calendar(result,SyncOptions(database=database))
+    assert calendar['error_code']=='CALENDAR_ERROR' and result.warnings
+
+
+def test_cli_reports_calendar_auth_failure_and_recovery_command():
+    from endurance_lab.cli import _format_sync
+    output=_format_sync({'status':'partial','calendar':{'error_code':'GOOGLE_AUTH_REQUIRED','error':'Token expired'},'warnings':['Authorization needs renewal']})
+    assert 'Calendar FAILED' in output and 'calendar-login' in output
+    assert 'Authorization needs renewal' in output
 
 
 def _paths():

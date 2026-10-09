@@ -16,4 +16,4 @@ if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Leng
 Set-Location -LiteralPath $runtime.project_root
 
 "[$(Get-Date -Format o)] Dashboard starting" | Add-Content -LiteralPath $logPath
-& $runtime.python_executable -m streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true 2>&1 | Add-Content -LiteralPath $logPath
+& $runtime.python_executable -m streamlit run (Join-Path $projectRoot 'dashboard/app.py') --server.address 0.0.0.0 --server.port 8501 --server.headless true 2>&1 | Add-Content -LiteralPath $logPath

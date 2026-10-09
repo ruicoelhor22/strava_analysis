@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from endurance_lab.prescription import prescribe_day
+from endurance_lab.weekly_adjustment import adjust_week
 
 
 def backtest(
@@ -18,7 +18,7 @@ def backtest(
     decisions = []
     cursor = start
     while cursor <= end:
-        decisions.extend(item.to_dict() for item in prescribe_day(cursor, database, persist=False))
+        decisions.extend(item.to_dict() for item in adjust_week(cursor, database, as_of=cursor, persist=False, strict_history=True) if item.date==cursor)
         cursor += timedelta(days=1)
     actions = Counter(item["action"] for item in decisions)
     reasons = Counter(rule for item in decisions for rule in item["rules_triggered"])
@@ -62,6 +62,7 @@ def backtest(
         "date_from": start.isoformat(),
         "date_to": end.isoformat(),
         "days_evaluated": (end - start).days + 1,
+        "historical_plan_policy": "Only imported revisions and decision history known before each local decision day; unavailable history is not reconstructed from today's plan.",
         "planned_sessions_evaluated": total,
         "decision_distribution": dict(actions),
         "rule_frequency": dict(reasons),

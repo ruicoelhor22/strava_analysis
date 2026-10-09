@@ -16,6 +16,7 @@ from endurance_lab.db import connect
 from endurance_lab.plan_adherence import plan_status, planned_sessions
 from endurance_lab.prescription import prescribe_day
 from endurance_lab.queries import daily_load
+from dashboard.plan_controls import session_controls
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -30,7 +31,7 @@ def _home_context(today: date) -> tuple[dict, list[dict], list[dict], dict, dict
             prescribed = {
                 int(row["planned_session_id"]): dict(row)
                 for row in connection.execute(
-                    f"SELECT planned_session_id, title, action, duration_seconds "
+                    f"SELECT planned_session_id, sport, title, action, duration_seconds "
                     f"FROM workout_prescriptions WHERE status='active' "
                     f"AND planned_session_id IN ({placeholders})", ids
                 )
@@ -72,7 +73,12 @@ def home_page(frame: pd.DataFrame) -> None:
 
     if prescriptions:
         primary = prescriptions[0]
+        if primary['action'] in {'DRAFT','INCOMPLETE','CANCELLED'}:
+            st.warning(f"Today's coach entry is {primary['action'].lower()}. It is not a confirmed prescription.")
         workout = primary.get("prescribed") or primary.get("original") or {}
+        if primary['action'] in {'DRAFT','INCOMPLETE','CANCELLED','SKIP'}:
+            workout={**workout,'title':primary['action'].title()+': '+str(workout.get('title') or 'Coach entry'),
+                     'duration_seconds':None,'intensity':'No firm workout prescribed','targets':{}}
         reasons = primary.get("reasons") or []
         duration = format_duration(workout.get("duration_seconds"))
         targets = workout.get("targets") or {}
@@ -93,6 +99,7 @@ def home_page(frame: pd.DataFrame) -> None:
             unsafe_allow_html=True,
         )
         st.button("View today's decision", on_click=_go, args=("Coach",), key="home-coach")
+        if primary.get('planned_session_id'): session_controls(primary['planned_session_id'],key_prefix='today')
     else:
         st.markdown(
             '<div class="lab-hero"><div class="lab-kicker">TODAY</div>'
@@ -150,12 +157,12 @@ def home_page(frame: pd.DataFrame) -> None:
         else:
             title = " · ".join(
                 f"{sport_marker(item['sport'])} "
-                f"{(prescribed.get(int(item['id'])) or {}).get('title') or item['title']}"
+                f"{item['title']}"
                 for item in items
             )
             detail = " · ".join(
-                f"{format_duration((prescribed.get(int(item['id'])) or {}).get('duration_seconds') or item.get('planned_duration_seconds'))} "
-                f"{(prescribed.get(int(item['id'])) or {}).get('action') or 'KEEP'} · "
+                f"{format_duration(item.get('planned_duration_seconds'))} "
+                f"{(item.get('athlete_decision') or {}).get('action') or item.get('lifecycle_state','confirmed').upper()} · "
                 f"{item.get('priority') or 'No priority'}"
                 for item in items
             )
@@ -164,8 +171,9 @@ def home_page(frame: pd.DataFrame) -> None:
                 for item in items
             )
             key = any(str(item.get("priority") or "").startswith("A") for item in items)
+            rest = all(item["completion_state"] == "rest" for item in items)
             badge = status_badge(
-                "Done" if complete else "Today" if day == today else "Key" if key else "Planned",
+                "Rest" if rest else "Done" if complete else "Today" if day == today else "Key" if key else "Planned",
                 "good" if complete else "watch" if key or day == today else "neutral",
             )
         week_html.append(

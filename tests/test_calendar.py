@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -64,6 +66,28 @@ def test_calendar_sync_is_idempotent_updates_and_removes_events():
     removed = sync_google_calendar(database, client=client, today=today, config_path=config)
     assert removed.removed == 1
     assert client.deleted == ["event-1"]
+
+
+def test_yesterdays_rest_choice_updates_existing_calendar_event():
+    from endurance_lab.training_decisions import choose_training
+    root,database,config=_fixture();client=FakeCalendarClient()
+    sync_google_calendar(database,client=client,today=date(2026,9,24),config_path=config)
+    with connect(database) as connection:
+        sid=connection.execute('SELECT id FROM planned_sessions LIMIT 1').fetchone()[0]
+    choose_training(sid,'MODIFY',database,workout={'date':'2026-09-25','sport':'other','title':'Rest','duration_seconds':0})
+    result=sync_google_calendar(database,client=client,today=date(2026,9,26),config_path=config)
+    assert result.updated==1 and client.updated[-1][1]['summary']=='Other: Rest'
+    assert sync_google_calendar(database,client=client,today=date(2026,9,26),config_path=config).unchanged==1
+
+
+def test_calendar_uses_same_serialized_workout_as_app_not_stale_columns():
+    root,database,config=_fixture();client=FakeCalendarClient()
+    workout={'date':'2026-09-25','sport':'strength','title':'Easy gym','duration_seconds':2400,'description':'Maintenance only','targets':{}}
+    with connect(database) as connection:
+        connection.execute('UPDATE workout_prescriptions SET prescribed_json=?',(json.dumps(workout),));connection.commit()
+    sync_google_calendar(database,client=client,today=date(2026,9,24),config_path=config)
+    assert client.created[0]['summary']=='Strength: Easy gym'
+    assert 'Duration: 40 minutes' in client.created[0]['description']
 
 
 def test_calendar_dry_run_does_not_require_credentials_or_write_links():

@@ -2,33 +2,54 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from endurance_lab.db import init_db, transaction
 from endurance_lab.plan_models import PlanImportSummary
 from endurance_lab.plan_parser import parse_workbook
+from endurance_lab.plan_revisions import bootstrap_revision, prepare_revision, finish_revision
+from endurance_lab.config import paths
 
 
 def import_training_plan(
     workbook: str | Path | None = None,
     database: str | Path | None = None,
+    *, dry_run: bool = False, force: bool = False,
 ) -> PlanImportSummary:
     parsed = parse_workbook(workbook)
-    init_db(database)
+    if not dry_run:
+        init_db(database)
     now = datetime.now(timezone.utc).isoformat()
     sports = dict(sorted(Counter(item.sport for item in parsed.sessions).items()))
     warnings = _warnings(parsed)
+    database_path=Path(database) if database else paths().database
+    if dry_run and not database_path.exists():
+        changes=tuple({'type':'SESSION_ADDED','date':str(s.planned_date),'title':s.title,'material':True} for s in parsed.sessions)
+        return PlanImportSummary(parsed.source,False,len(parsed.sheets),len(parsed.phases),len(parsed.weeks),len(parsed.sessions),parsed.date_start,parsed.date_end,sports,warnings,changes=changes)
     with transaction(database) as connection:
         existing = connection.execute(
             "SELECT id, source_sha256 FROM training_plans WHERE source_path = ?",
             (str(parsed.source),),
         ).fetchone()
-        if existing and str(existing["source_sha256"]) == parsed.source_sha256:
+        if existing and str(existing["source_sha256"]) == parsed.source_sha256 and not force:
+            if not dry_run:
+                bootstrap_revision(connection, int(existing['id']))
             return PlanImportSummary(
                 parsed.source, True, len(parsed.sheets), len(parsed.phases), len(parsed.weeks),
                 len(parsed.sessions), parsed.date_start, parsed.date_end, sports, warnings,
             )
+        if not parsed.sessions:
+            raise ValueError("No usable or partially specified sessions found; existing plan preserved.")
+        matches, changes = {}, []
+        if existing:
+            if not dry_run:
+                bootstrap_revision(connection, int(existing['id']))
+            parsed, matches, changes = prepare_revision(connection, parsed, int(existing['id']))
+        else:
+            changes = [{'type':'SESSION_ADDED','date':str(s.planned_date),'title':s.title,'material':True} for s in parsed.sessions]
+        if dry_run:
+            return PlanImportSummary(parsed.source, False, len(parsed.sheets), len(parsed.phases), len(parsed.weeks), len(parsed.sessions), parsed.date_start, parsed.date_end, sports, warnings, changes=tuple(changes))
         if existing:
             plan_id = int(existing["id"])
             connection.execute(
@@ -61,6 +82,11 @@ def import_training_plan(
         connection.execute("UPDATE training_phases SET active = 0 WHERE plan_id = ?", (plan_id,))
         connection.execute("UPDATE training_weeks SET active = 0 WHERE plan_id = ?", (plan_id,))
         connection.execute("UPDATE planned_sessions SET active = 0 WHERE plan_id = ?", (plan_id,))
+        # Historical completions survive removals and edits as stable imported records.
+        connection.execute("UPDATE planned_sessions SET active=1 WHERE plan_id=? AND id IN (SELECT planned_session_id FROM planned_activity_matches WHERE is_selected=1)", (plan_id,))
+        connection.execute("""UPDATE planned_sessions SET active=1 WHERE plan_id=? AND planned_date<?
+                              AND lower(source_status) IN ('completed','modified')
+                              AND json_extract(workbook_actual_json,'$."Actual Session"') IS NOT NULL""",(plan_id,date.today().isoformat()))
 
         phase_ids: dict[str, int] = {}
         for phase in parsed.phases:
@@ -100,7 +126,9 @@ def import_training_plan(
                 (plan_id, week.week_start.isoformat()),
             ).fetchone()[0])
 
-        for session in parsed.sessions:
+        for index, session in enumerate(parsed.sessions):
+            if index in matches and matches[index].get('has_completion'):
+                continue
             values = (
                 plan_id, week_ids.get(session.week_start.isoformat()), session.planned_date.isoformat(),
                 session.sport, session.session_type, session.workout_code, session.title,
@@ -173,9 +201,18 @@ def import_training_plan(
                  session.intensity, targets_json, now),
             )
 
+        populated_dates = {str(s.planned_date) for s in parsed.sessions}
+        missing_dates = []
+        from datetime import timedelta
+        cursor = parsed.date_start
+        while cursor <= parsed.date_end:
+            if cursor.isoformat() not in populated_dates: missing_dates.append(cursor.isoformat())
+            cursor += timedelta(days=1)
+        revision_id = finish_revision(connection, parsed, plan_id, changes, missing_dates)
+
     return PlanImportSummary(
         parsed.source, False, len(parsed.sheets), len(parsed.phases), len(parsed.weeks),
-        len(parsed.sessions), parsed.date_start, parsed.date_end, sports, warnings,
+        len(parsed.sessions), parsed.date_start, parsed.date_end, sports, warnings, revision_id, tuple(changes),
     )
 
 

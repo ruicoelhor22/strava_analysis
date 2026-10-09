@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,28 @@ def parse_fit(path: str | Path, file_sha256: str | None = None) -> list[ParsedAc
             trackpoints=points,
         )
         parsed.append(finalize_activity(activity))
-    return parsed
+    return _collapse_micro_sessions(parsed, source.name)
+
+
+def _collapse_micro_sessions(activities: list[ParsedActivity], filename: str) -> list[ParsedActivity]:
+    """Ignore tiny FIT start/transition fragments around one substantive session.
+
+    Some Strava exports contain one-second sport fragments before the actual
+    workout. They are not separate canonical activities, and the substantive
+    session should retain the Strava ID encoded in the filename.
+    """
+    source_id = source_activity_id_from_filename(filename)
+    if source_id is None or len(activities) < 2:
+        return activities
+    substantive = [activity for activity in activities if (activity.elapsed_seconds or 0) >= 120]
+    if len(substantive) != 1:
+        return activities
+    main = substantive[0]
+    fragments = [activity for activity in activities if activity is not main]
+    if not all((activity.elapsed_seconds or 0) <= 5 and (activity.distance_m or 0) <= 20
+               and len(activity.trackpoints) <= 5 for activity in fragments):
+        return activities
+    return [replace(main, stable_id=f"strava:{source_id}", source_activity_id=source_id)]
 
 
 def semicircles_to_degrees(value: int | float | None) -> float | None:

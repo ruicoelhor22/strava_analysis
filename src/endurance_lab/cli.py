@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from endurance_lab.analytics import analyze_database
+from endurance_lab.archive import archive_status, database_integrity, failure_reason, reconcile_archive
 from endurance_lab.automation import (
     automation_status, configure_ngrok_phone_access, install_windows_tasks,
     phone_access_status, uninstall_windows_tasks,
@@ -50,9 +51,10 @@ from endurance_lab.strava_export import (
     format_reconciliation,
     reconcile,
 )
-from endurance_lab.strava_manifest import merge_manifest_source
+from endurance_lab.strava_manifest import load_manifest, merge_manifest_source
 from endurance_lab.strava_discovery import DiscoveryError, StravaDiscovery, default_discovery_window
 from endurance_lab.sync_pipeline import SyncOptions, SyncPipeline, sync_status
+from endurance_lab.sync_lock import SyncLock
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_import.add_argument("workbook", nargs="?", help="Auto-detected under training_data when omitted")
     plan_import.add_argument("--database")
+    plan_import.add_argument('--dry-run', action='store_true')
+    plan_import.add_argument('--force', action='store_true')
+    plan_import.add_argument('--show-diff', action='store_true')
     plan_match = commands.add_parser(
         "plan-match", help="Match planned sessions to imported activities"
     )
@@ -128,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_command.add_argument("--to", dest="date_to", required=True)
     backtest_command.add_argument("--database")
     backtest_command.add_argument("--json", action="store_true")
-    sync_command = commands.add_parser("sync", help="Bring Strava, analytics, plan matching, and coaching up to date")
+    sync_command = commands.add_parser("sync", aliases=['update'], help="Sync activities; update also refreshes recent analytics and restarts the dashboard")
     sync_command.add_argument("--from", dest="date_from")
     sync_command.add_argument("--to", dest="date_to")
     sync_command.add_argument("--all", action="store_true", dest="all_history")
@@ -157,6 +162,25 @@ def build_parser() -> argparse.ArgumentParser:
     sync_status_command.add_argument("--downloads", default="training_data/import")
     sync_status_command.add_argument("--database")
     sync_status_command.add_argument("--json", action="store_true")
+    archive_status_command = commands.add_parser("archive-status", help="Report known activities and detailed source coverage")
+    archive_status_command.add_argument("--manifest", default="training_data/manifest.csv")
+    archive_status_command.add_argument("--downloads", default="training_data/import")
+    archive_status_command.add_argument("--database")
+    archive_status_command.add_argument("--json", action="store_true")
+    archive_reconcile_command = commands.add_parser("archive-reconcile", help="Reconcile local sources and historical metadata conservatively")
+    archive_reconcile_command.add_argument("--manifest", default="training_data/manifest.csv")
+    archive_reconcile_command.add_argument("--downloads", default="training_data/import")
+    archive_reconcile_command.add_argument("--database")
+    archive_reconcile_command.add_argument("--profile", default="training_data/auth/strava-browser-profile")
+    archive_reconcile_command.add_argument("--metadata", action="store_true", help="Discover historical metadata in one date window")
+    archive_reconcile_command.add_argument("--from", dest="date_from", type=_parse_date)
+    archive_reconcile_command.add_argument("--to", dest="date_to", type=_parse_date)
+    archive_reconcile_command.add_argument("--retry-transient", action="store_true", help="Retry a bounded batch of transient export failures")
+    archive_reconcile_command.add_argument("--retry-pending", action="store_true", help="Try a small batch of newly discovered exports")
+    archive_reconcile_command.add_argument("--retry-ambiguous", action="store_true", help="Recheck a small batch of ambiguous HTML export failures")
+    archive_reconcile_command.add_argument("--retry-limit", type=int, default=10, help="Maximum exports to try (1-25)")
+    archive_reconcile_command.add_argument("--dry-run", action="store_true")
+    archive_reconcile_command.add_argument("--json", action="store_true")
     calendar_login = commands.add_parser("calendar-login", help="Authorize private Google Calendar access")
     calendar_login.add_argument("--client", default=DEFAULT_CLIENT_FILE)
     calendar_login.add_argument("--token", default=DEFAULT_TOKEN_FILE)
@@ -303,9 +327,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if locals().get("had_failures", False) else 0
     if args.command == "status":
         init_db()
-        quality = data_quality()
-        for key, value in quality.items():
-            print(f"{key}: {value}")
+        counts = data_quality()
+        archive = archive_status()
+        sync = sync_status()
+        quality = ingestion_quality_report()
+        integrity = database_integrity()
+        print("ENDURANCE LAB HEALTH")
+        print(f"Activities: {counts.get('activities', 0)} ({archive['detailed_activities']} detailed, {archive['metadata_only_activities']} metadata-only)")
+        print(f"Last sync: {(sync.get('last_run') or {}).get('status') or 'never'}")
+        print(f"Known activities: {archive['status']} ({archive['total_known_activities']} recorded; {archive['missing_activity_records']} missing records)")
+        print(f"Detailed data coverage: {archive['detailed_activities']}/{archive['total_known_activities']} ({archive['detailed_data_coverage_percent']:.1f}%)")
+        print(f"Data quality: {quality['severity_counts']['error']} errors, {quality['severity_counts']['warning']} warnings, {quality['severity_counts']['advisory']} advisories")
+        print(f"Database integrity: {'OK' if integrity['ok'] else 'CHECK REQUIRED'}")
         return 0
     if args.command == "quality":
         print(json.dumps(ingestion_quality_report(), indent=2, default=str))
@@ -331,11 +364,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "plan-import":
         try:
-            summary = import_training_plan(args.workbook, args.database)
+            summary = import_training_plan(args.workbook, args.database, dry_run=args.dry_run, force=args.force)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             print(f"Plan import error: {exc}", file=sys.stderr)
             return 2
         print(format_import_summary(summary))
+        if args.dry_run: print('Preview only: no plan revision activated.')
+        if args.show_diff:
+            for change in summary.changes:
+                print(f"{change.get('date','')}: {change['type']} · {change.get('title','')} · {change.get('before','')} → {change.get('after','')}")
         return 0
     if args.command == "plan-match":
         counts = match_training_plan(args.database)
@@ -352,6 +389,12 @@ def main(argv: list[str] | None = None) -> int:
             print("TRAINING PLAN")
             print(f"Date range: {plan.get('date_start', '—')} to {plan.get('date_end', '—')}")
             print(f"Planned sessions: {report['sessions']}")
+            revision = report.get('revision') or {}
+            print(f"Revision: {revision.get('id','not yet versioned')} · Imported: {revision.get('imported_at','—')}")
+            print(f"Workbook: {revision.get('source_filename','—')} · Hash: {str(revision.get('source_hash',''))[:12]}")
+            print(f"Lifecycle: {report.get('lifecycle_counts',{})}")
+            print(f"Athlete decisions: {report.get('athlete_decisions',0)} · Conflicts: {report.get('decision_conflicts',0)}")
+            print(f"Unspecified calendar days: {len(revision.get('missing_dates',[]))}")
             for key in ("matched", "manual", "probable", "ambiguous", "unmatched"):
                 print(f"{key.title()}: {report['matches'].get(key, 0)}")
             print(f"Completed: {report['states'].get('completed', 0) + report['states'].get('completed_metadata', 0)}")
@@ -426,14 +469,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps(result, indent=2, default=str) if args.json else _format_backtest(result))
         return 0
-    if args.command == "sync":
+    if args.command in {"sync","update"}:
         try:
             result = SyncPipeline().run(SyncOptions(
                 date_from=_parse_date(args.date_from) if args.date_from else None,
                 date_to=_parse_date(args.date_to) if args.date_to else None,
                 all_history=args.all_history, dry_run=args.dry_run,
                 skip_coaching=args.skip_coaching, skip_calendar=args.skip_calendar,
-                force_discovery=args.force_discovery,
+                force_discovery=args.force_discovery or args.command=='update',
+                full_refresh=args.command=='update',
                 profile=args.profile, manifest=args.manifest, downloads=args.output,
                 database=args.database, delay_seconds=args.delay,
             ))
@@ -441,6 +485,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Sync error: {exc}", file=sys.stderr)
             return 2
         print(json.dumps(result.to_dict(), indent=2, default=str) if args.json else _format_sync(result.to_dict()))
+        if args.command=='update' and not args.dry_run and result.status in {'success','partial'}:
+            from endurance_lab.automation import restart_dashboard
+            try:
+                restart_dashboard()
+                if not args.json: print('Dashboard restarted; refresh the page on your phone.')
+            except Exception as exc:
+                print(f'Dashboard restart failed: {exc}',file=sys.stderr)
+                return 1
         if result.status in {"success", "dry_run"}:
             return 0
         return 3 if result.error_code == "AUTH_REQUIRED" else 4 if result.error_code == "SYNC_LOCKED" else 1
@@ -474,6 +526,74 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sync-status":
         report = sync_status(args.database, args.manifest, args.downloads)
         print(json.dumps(report, indent=2, default=str) if args.json else _format_sync_status(report))
+        return 0
+    if args.command == "archive-status":
+        report = archive_status(args.database, args.manifest, args.downloads)
+        print(json.dumps(report, indent=2) if args.json else _format_archive_status(report))
+        return 0
+    if args.command == "archive-reconcile":
+        discovery = None
+        retries = None
+        archive_lock = SyncLock()
+        try:
+            archive_lock.__enter__()
+            if not 1 <= args.retry_limit <= 25:
+                raise ValueError("--retry-limit must be between 1 and 25")
+            if args.metadata or args.retry_transient or args.retry_pending or args.retry_ambiguous:
+                with PlaywrightTransport(args.profile, headless=True) as transport:
+                    authentication = check_authentication(transport.context)
+                    if not authentication.authenticated:
+                        print(AUTH_REQUIRED_MESSAGE, file=sys.stderr)
+                        return 3
+                    if args.metadata:
+                        start, end = default_discovery_window(args.manifest, args.database)
+                        if args.date_from:
+                            start = args.date_from
+                        else:
+                            from endurance_lab.db import connect
+                            with connect(args.database) as connection:
+                                earliest = connection.execute("SELECT MIN(substr(started_at,1,10)) FROM activities").fetchone()[0]
+                            start = date.fromisoformat(earliest) - timedelta(days=7) if earliest else start
+                        discovery = StravaDiscovery(transport, delay_seconds=2.0).discover(
+                            date_from=start, date_to=args.date_to or end,
+                            manifest_path=args.manifest, database=args.database, dry_run=args.dry_run,
+                        )
+                    if args.retry_transient or args.retry_pending or args.retry_ambiguous:
+                        candidates = [
+                            row for row in load_manifest(args.manifest)
+                            if ((args.retry_transient and failure_reason(row) in {"authentication", "rate_limit", "network"})
+                                or (args.retry_pending and row.download_status == "pending")
+                                or (args.retry_ambiguous and failure_reason(row) == "ambiguous_html"))
+                        ]
+                        candidates.sort(key=lambda row: (row.last_attempt_at or "", int(row.strava_id)))
+                        if candidates:
+                            downloader = StravaDownloader(
+                                transport, delay_seconds=3.0, max_retries=1,
+                                authentication_probe=lambda: check_authentication(transport.context).authenticated,
+                            )
+                            retries = downloader.run(
+                                args.manifest, args.downloads,
+                                activity_ids={row.strava_id for row in candidates[:args.retry_limit]},
+                                dry_run=args.dry_run, emit=lambda _: None,
+                            )
+            report = reconcile_archive(args.database, args.manifest, args.downloads, dry_run=args.dry_run)
+        except (ValueError, RuntimeError, DiscoveryError) as exc:
+            print(f"Archive reconciliation stopped: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            archive_lock.__exit__(None, None, None)
+        payload = {
+            "discovery": None if discovery is None else {
+                "found": discovery.found, "updated": discovery.updated,
+                "pages_checked": discovery.pages_checked, "complete": discovery.complete,
+            },
+            "transient_retries": None if retries is None else {
+                "selected": retries.selected, "downloaded": retries.downloaded,
+                "failed": retries.failed, "rate_limited": retries.rate_limited,
+            },
+            **report,
+        }
+        print(json.dumps(payload, indent=2) if args.json else _format_archive_status(report["after"]))
         return 0
     if args.command == "calendar-login":
         try:
@@ -863,6 +983,15 @@ def _format_sync(payload: dict) -> str:
     ]
     if payload.get("error_summary"):
         lines.extend([f"Reason: {payload['error_summary']}"])
+    for week in coaching.get('weeks',[]):
+        lines.append(f"Week {week['week_start']}: {week['actual_duration_seconds']/3600:.2f} h actual; {week['completed_sessions']}/{week['planned_sessions']} planned sessions completed; {week['unmatched_activities']} extra/unmatched activities.")
+    for decision in coaching.get('upcoming_decisions',[]):
+        lines.append(f"{decision['date']} {decision['action']}: {decision['title']} — {decision['reason']}")
+    if calendar.get('error_code'):
+        lines.append(f"Calendar FAILED [{calendar['error_code']}]: {calendar.get('error','Unknown error')}")
+        if calendar['error_code']=='GOOGLE_AUTH_REQUIRED':
+            lines.append('Run: python -m endurance_lab calendar-login\nThen: python -m endurance_lab update')
+    for warning in payload.get('warnings',[]): lines.append('Warning: '+str(warning))
     if payload.get("error_code") == "AUTH_REQUIRED":
         lines.extend(["", AUTH_REQUIRED_MESSAGE, "", "Then run:", "python -m endurance_lab sync"])
     elif payload.get("status") == "success":
@@ -965,9 +1094,28 @@ def _format_sync_status(payload: dict) -> str:
         f"Last status: {run.get('status') or 'not run'}",
         f"Last successful sync: {payload.get('last_successful_sync') or 'never'}",
         f"Latest DB activity: {latest.get('started_at') or 'unavailable'} ({latest.get('source_activity_id') or 'no Strava ID'})",
-        f"Pending downloads: {payload['pending_downloads']}",
+        f"Unrecovered detail exports: {payload['pending_downloads']}",
         f"Pending imports: {payload['pending_imports']}",
         f"Metadata-only activities: {payload['metadata_only']}",
+    ])
+
+
+def _format_archive_status(payload: dict) -> str:
+    return "\n".join([
+        "STRAVA ARCHIVE STATUS",
+        f"Manifest entries: {payload['manifest_entries']}",
+        f"Total known activities: {payload['total_known_activities']}",
+        f"Detailed activities: {payload['detailed_activities']}",
+        f"Metadata-only activities: {payload['metadata_only_activities']}",
+        f"Detail recovery candidates: {payload['detail_recovery_candidates']}",
+        f"Non-strength export questions: {payload['non_strength_export_questions']}",
+        f"Missing activity records: {payload['missing_activity_records']}",
+        f"Missing dates: {payload['missing_dates']}",
+        f"Detailed data coverage: {payload['detailed_activities']}/{payload['total_known_activities']} ({payload['detailed_data_coverage_percent']:.1f}%)",
+        f"Status: {payload['status']}",
+        "Export-detail reasons: " + ", ".join(
+            f"{key} {count}" for key, count in payload["failure_reasons"].items()
+        ),
     ])
 
 

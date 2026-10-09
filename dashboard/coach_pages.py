@@ -12,6 +12,7 @@ from endurance_lab.plan_adherence import planned_sessions
 from endurance_lab.prescription import prescribe_day
 from endurance_lab.subjective import get_checkin, save_checkin
 from endurance_lab.weekly_adjustment import adjust_week
+from dashboard.plan_controls import session_controls, revision_panel
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -32,6 +33,7 @@ def _week(value: date, as_of: date) -> list[dict]:
 def coach_page() -> None:
     today = date.today()
     page_intro("Endurance coach / decision trace", "Coach", "What matters now, today's decision, and the evidence behind it.")
+    revision_panel()
     prescriptions = _day(today)
     state = _state(today)
 
@@ -47,6 +49,7 @@ def coach_page() -> None:
         st.info("There is no explicit workout in the imported coaching plan today. The engine does not invent one.")
     for item in prescriptions:
         _prescription_card(item)
+        if item.get('planned_session_id'): session_controls(item['planned_session_id'],key_prefix='coach')
 
     section_header("Why", "The evidence available before today's workout.")
     left, right = st.columns([1.35, 1])
@@ -117,24 +120,35 @@ def coach_page() -> None:
 
 
 def _prescription_card(item: dict) -> None:
-    workout = item["prescribed"]
+    original = item.get('original') or {}
+    workout = item.get('prescribed')
+    has_workout = bool(workout)
+    heading_workout = workout or original
     action = item["action"].replace("_", " ").title()
     tone = "good" if item["action"] == "KEEP" else "watch"
-    original_duration = item["original"].get("duration_seconds")
-    prescribed_duration = workout.get("duration_seconds")
+    original_duration = original.get("duration_seconds")
+    prescribed_duration = workout.get("duration_seconds") if has_workout else None
     with st.container(border=True):
         heading, decision = st.columns([4, 1])
         with heading:
             st.markdown(
-                f'<div class="workout-kicker">{escape(str(workout["sport"]).title())} · '
-                f'{escape(str(workout.get("intensity") or "Planned workout"))}</div>'
-                f'<div class="workout-title">{escape(str(workout["title"]))}</div>'
-                f'<div class="workout-meta">{format_duration(prescribed_duration)} · '
-                f'{escape(str(workout.get("priority") or "No priority"))}</div>',
+                f'<div class="workout-kicker">{escape(str(heading_workout.get("sport") or "Training").title())} · '
+                f'{escape(str(heading_workout.get("intensity") or "Coach entry"))}</div>'
+                f'<div class="workout-title">{escape(str(heading_workout.get("title") or "No planned workout"))}</div>'
+                f'<div class="workout-meta">{format_duration(prescribed_duration) if has_workout else "No workout prescribed"} · '
+                f'{escape(str(heading_workout.get("priority") or "No priority"))}</div>',
                 unsafe_allow_html=True,
             )
         with decision:
             st.markdown(decision_pill(action, tone), unsafe_allow_html=True)
+        if not has_workout:
+            messages = {'SKIP':'Skipped — no replacement workout is prescribed.',
+                        'DRAFT':'Draft coach entry — not a confirmed prescription.',
+                        'INCOMPLETE':'Incomplete coach entry — no firm workout is prescribed.',
+                        'CANCELLED':'Cancelled — no workout is prescribed.'}
+            st.caption(messages.get(item['action'],'No workout is prescribed for this entry.'))
+            for reason in item.get('reasons') or []: st.caption(reason)
+            return
         if original_duration and prescribed_duration and original_duration != prescribed_duration:
             st.caption(
                 f"Adjusted from {format_duration(original_duration)} to {format_duration(prescribed_duration)}; "
@@ -184,7 +198,7 @@ def _adaptation_rows(start: date, end: date) -> pd.DataFrame:
         rows.append({
             "date": session["planned_date"],
             "sport": str(session["sport"]).title(),
-            "original plan": session["title"],
+            "original plan": (session.get('coach_plan') or {}).get('title') or session['title'],
             "current prescription": prescribed.get("title") or ("No replacement — not training debt" if item and item["action"] == "SKIP" else session["title"]),
             "decision": item["action"].replace("_", " ").title() if item else "Keep",
             "status": session["completion_state"].replace("_", " ").title(),

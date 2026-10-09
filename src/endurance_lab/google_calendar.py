@@ -354,11 +354,12 @@ def sync_google_calendar(
     today = today or date.today()
     horizon = max(0, int(days_ahead if days_ahead is not None else settings.get("days_ahead", 14)))
     end = today + timedelta(days=horizon)
+    start = today-timedelta(days=max(0,int(settings.get('planned_lookback_days',7))))
     summary = CalendarSyncSummary(
         enabled=bool(settings.get("enabled", False)), calendar_id=calendar_id,
-        date_from=today.isoformat(), date_to=end.isoformat(), dry_run=dry_run,
+        date_from=start.isoformat(), date_to=end.isoformat(), dry_run=dry_run,
     )
-    rows = _active_prescriptions(database, today, end)
+    rows = _active_prescriptions(database, start, end,calendar_id=calendar_id)
     summary.considered = len(rows)
     api = client
     if not dry_run and api is None:
@@ -389,7 +390,7 @@ def sync_google_calendar(
                 summary.created += int(link is None)
                 continue
             try:
-                if link:
+                if link and link['status']=='active':
                     remote = api.update(calendar_id, str(link["external_event_id"]), event)
                     event_id = str(remote.get("id") or link["external_event_id"])
                     summary.updated += 1
@@ -421,7 +422,7 @@ def sync_google_calendar(
             """SELECT * FROM calendar_event_links
                WHERE provider='google' AND calendar_id=? AND status='active'
                  AND event_date BETWEEN ? AND ?""",
-            (calendar_id, today.isoformat(), end.isoformat()),
+            (calendar_id, start.isoformat(), end.isoformat()),
         ).fetchall()
         for link in stale:
             if int(link["planned_session_id"]) in desired_ids:
@@ -555,20 +556,55 @@ def calendar_status(database: str | Path | None = None, config_path: str | Path 
     }
 
 
-def _active_prescriptions(database, start: date, end: date) -> list[dict[str, Any]]:
+def _active_prescriptions(database, start: date, end: date, *, calendar_id=None) -> list[dict[str, Any]]:
+    from endurance_lab.training_decisions import training_decisions
+    from endurance_lab.plan_lifecycle import resolve_session, lifecycle_rows
+    decisions = training_decisions(database)
+    lifecycle = lifecycle_rows(database)
     with connect(database) as connection:
-        return [dict(row) for row in connection.execute(
+        prescriptions = {row['planned_session_id']:dict(row) for row in connection.execute(
             """SELECT p.id prescription_id, p.planned_session_id, p.prescribed_date,
                       p.sport, p.title, p.description, p.duration_seconds, p.distance_m,
-                      p.intensity, p.targets_json, p.reason, p.action, p.confidence,
-                      p.optional_gate_json, s.priority
+                      p.intensity, p.targets_json, p.prescribed_json, p.reason, p.action, p.confidence,
+                      p.optional_gate_json, COALESCE(json_extract(td.workout_json, '$.priority'), s.priority) AS priority
                FROM workout_prescriptions p
                JOIN planned_sessions s ON s.id=p.planned_session_id
+               LEFT JOIN training_decisions td ON td.planned_session_id=s.id
                WHERE p.status='active' AND s.active=1
-                 AND p.prescribed_date BETWEEN ? AND ?
                ORDER BY p.prescribed_date, p.id""",
-            (start.isoformat(), end.isoformat()),
-        )]
+        )}
+        sessions = [dict(r) for r in connection.execute('SELECT * FROM planned_sessions WHERE active=1 OR EXISTS(SELECT 1 FROM training_decisions td WHERE td.planned_session_id=planned_sessions.id)')]
+        linked_in_window={r[0] for r in connection.execute("SELECT planned_session_id FROM calendar_event_links WHERE calendar_id=? AND status='active' AND event_date BETWEEN ? AND ?",(calendar_id,start.isoformat(),end.isoformat()))}
+        moved_by_coach=set()
+        for revision in connection.execute("SELECT change_summary_json FROM plan_revisions WHERE status='active'"):
+            moved_by_coach.update(c.get('session_id') for c in json.loads(revision[0]) if c['type']=='SESSION_MOVED')
+        for session in sessions:
+            session['targets'] = [dict(t) for t in connection.execute('SELECT * FROM planned_session_targets WHERE planned_session_id=?',(session['id'],))]
+    results=[]
+    for session in sessions:
+        prescription = prescriptions.get(session['id'])
+        if prescription:
+            if prescription['prescribed_json'] is not None:
+                prescription['prescribed'] = json.loads(prescription['prescribed_json'])
+            else:  # Legacy/manual records without a serialized workout.
+                prescription['prescribed'] = {'date':prescription['prescribed_date'],'sport':prescription['sport'],'title':prescription['title'],
+                                             'description':prescription['description'],'duration_seconds':prescription['duration_seconds'],
+                                             'distance_m':prescription['distance_m'],'intensity':prescription['intensity'],
+                                             'targets':json.loads(prescription.get('targets_json') or '{}')}
+        layers = resolve_session(session,prescription,decisions.get(session['id']),lifecycle.get(session['id']))
+        workout = layers['effective']
+        if not workout or workout['date']<start.isoformat(): continue
+        moved=bool(decisions.get(session['id']) and workout['date']!=session['planned_date']) or (prescription or {}).get('action')=='MOVE' or session['id'] in moved_by_coach
+        if workout['date']>end.isoformat() and not (moved and session['id'] in linked_in_window): continue
+        provenance = f"Coach plan: {session['title']}."
+        if prescription: provenance += f" App: {prescription['action']}."
+        if layers['athlete_decision']:
+            provenance += f" Athlete: {layers['athlete_decision']['action']}."
+            if layers['needs_review']: provenance += ' Coach revision: decision needs review.'
+        results.append({**(prescription or {}), **workout,'planned_session_id':session['id'],'prescription_id':(prescription or {}).get('prescription_id'),
+                        'prescribed_date':workout['date'],'action':decisions.get(session['id'],{}).get('action') or (prescription or {}).get('action','KEEP'),
+                        'reason':provenance,'targets_json':json.dumps(workout.get('targets',{})), 'priority':workout.get('priority',session.get('priority'))})
+    return results
 
 
 def _event(row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:

@@ -16,6 +16,78 @@ from endurance_lab.session_cost import assess_session_cost, session_cost
 from endurance_lab.subjective import save_checkin
 from endurance_lab.weekly_adjustment import adjust_week
 from endurance_lab.workout_execution import evaluate_activity
+from endurance_lab.training_decisions import save_training_decision
+from endurance_lab.plan_adherence import planned_sessions
+from endurance_lab.plan_matching import match_training_plan
+from endurance_lab.weekly_adjustment import _interference
+from endurance_lab.weekly_adjustment import _can_move, _adapt, _strength_region
+
+
+def test_athlete_rest_and_upper_gym_choices_survive_reconciliation():
+    database = _database()
+    rest_id = _plan_session(database, "2026-01-08", "strength", "Gym B", 3000)
+    gym_id = _plan_session(database, "2026-01-09", "cycling", "Easy spin", 4200)
+    save_training_decision(rest_id, {"date": "2026-01-08", "sport": "other", "title": "Rest", "duration_seconds": 0}, "Athlete chose rest", database)
+    save_training_decision(gym_id, {"date": "2026-01-09", "sport": "strength", "title": "Pull + arms", "duration_seconds": 3000}, "Gym moved to Friday", database)
+    first = adjust_week(date(2026, 1, 8), database, as_of=date(2026, 1, 8))
+    second = adjust_week(date(2026, 1, 8), database, as_of=date(2026, 1, 8))
+    assert [item.prescription_id for item in first] == [item.prescription_id for item in second]
+    assert first[0].action == "REST" and first[0].prescribed["duration_seconds"] == 0
+    assert first[1].action == "USER_CHOICE" and first[1].prescribed["sport"] == "strength"
+    assert first[1].original["sport"] == "cycling"
+    rows = planned_sessions(database, today=date(2026, 1, 10))
+    assert rows[0]["completion_state"] == "rest"
+    assert rows[1]["sport"] == "strength"
+    with connect(database) as connection:
+        assert connection.execute("SELECT sport FROM planned_sessions WHERE id=?", (gym_id,)).fetchone()[0] == "cycling"
+
+
+def test_leg_soreness_does_not_automatically_remove_upper_body_gym():
+    database = _database()
+    _plan_session(database, "2026-01-08", "strength", "Gym B — pull + arms", 3000)
+    _plan_session(database, "2026-01-09", "cycling", "Key threshold", 3600, priority="A")
+    save_checkin(date(2026, 1, 8), database, fatigue=2, leg_soreness=4)
+    result = adjust_week(date(2026, 1, 8), database, as_of=date(2026, 1, 8), persist=False)[0]
+    assert result.action == "KEEP"
+    assert "upper_body_maintenance_before_key" in result.rules_triggered
+    assert "avoid failure" in result.prescribed["description"]
+    save_checkin(date(2026, 1, 8), database, fatigue=4, leg_soreness=2)
+    assert adjust_week(date(2026, 1, 8), database, as_of=date(2026, 1, 8), persist=False)[0].action == "REDUCE_INTENSITY"
+
+
+def test_session_move_cannot_crowd_next_key_and_removed_gym_does_not_add_run():
+    session = {"id": 1, "planned_date": "2026-01-08", "sport": "cycling"}
+    key = {"id": 2, "planned_date": "2026-01-10", "priority": "A"}
+    assert not _can_move(session, [session, key], {})
+    assert _can_move(session, [session, {**key, "planned_date": "2026-01-11"}], {})
+    adapted = _adapt({"sport": "strength", "title": "Gym"}, "REPLACE_WITH_EASY", date(2026, 1, 8), None, {})
+    assert adapted["sport"] == "other" and adapted["duration_seconds"] == 0
+    assert _strength_region({"sport": "strength", "title": "Legs + upper body"}) == "full"
+
+
+def test_replacement_gym_matches_actual_and_rest_does_not_steal_it():
+    database = _database()
+    rest_id = _plan_session(database, "2026-01-08", "strength", "Gym", 3000)
+    gym_id = _plan_session(database, "2026-01-09", "cycling", "Easy spin", 4200)
+    save_training_decision(rest_id, {"date": "2026-01-08", "sport": "other", "title": "Rest", "duration_seconds": 0}, "Rest", database)
+    save_training_decision(gym_id, {"date": "2026-01-09", "sport": "strength", "title": "Pull + arms", "duration_seconds": 3000}, "Moved gym", database)
+    actual_id = _activity(database, "2026-01-09", "strength", 3000, name="Pull + arms")
+    match_training_plan(database)
+    rows = planned_sessions(database, today=date(2026, 1, 10))
+    assert rows[0]["completion_state"] == "rest" and rows[0]["activity_id"] is None
+    assert rows[1]["activity_id"] == actual_id
+
+
+def test_lower_body_interference_excludes_explicit_upper_body_work():
+    from datetime import datetime
+    cost = assess_session_cost(
+        {"id": 1, "sport": "strength", "moving_seconds": 3000}, {},
+        strength_context={"movement_counts": {"lower": 6}, "working_sets": {"lower": 6}},
+    )
+    actual = [{"started_at": datetime.fromisoformat("2026-01-07T12:00:00+00:00"), "cost": cost}]
+    session = {"sport": "strength", "planned_date": "2026-01-08", "title": "Pull + arms"}
+    assert not any(flag["type"] == "lower_body_strength" for flag in _interference(session, actual, {}))
+    assert any(flag["type"] == "lower_body_strength" for flag in _interference({**session, "title": "Legs"}, actual, {}))
 
 
 def test_schema_three_migrates_additively_to_adaptive_coaching_schema():

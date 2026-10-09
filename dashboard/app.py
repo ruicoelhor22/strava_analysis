@@ -32,17 +32,19 @@ from dashboard.coach_pages import coach_page
 from dashboard.home_pages import home_page
 from dashboard.plan_pages import coaching_overview_page, training_plan_page
 from endurance_lab.analytics import analyze_database
+from endurance_lab.archive import archive_status
 from endurance_lab.automation import automation_status
 from endurance_lab.config import ftp_at, load_athlete_config, paths
 from endurance_lab.google_calendar import calendar_status
 from endurance_lab.quality import ingestion_quality_report
+from endurance_lab.session_conclusion import build_session_conclusion
+from endurance_lab.strength_profile import summarize_strength
 from endurance_lab.queries import (
     activities,
     activity,
     activity_streams,
     comparable_activities,
     daily_load,
-    data_quality,
     import_history,
     laps,
     power_curve,
@@ -76,6 +78,11 @@ def local_automation_status() -> dict:
 @st.cache_data(ttl=30, show_spinner=False)
 def local_calendar_status() -> dict:
     return calendar_status()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def local_archive_status() -> dict:
+    return archive_status()
 
 
 def main() -> None:
@@ -456,7 +463,7 @@ def swimming_page(frame: pd.DataFrame) -> None:
 
 
 def strength_page(frame: pd.DataFrame, period_all: pd.DataFrame) -> None:
-    page_intro("Strength support", "Strength frequency & proximity", "Session timing and imported set details, without inventing missing units or measurements.")
+    page_intro("Strength support", "Strength training", "Logged load, exercise focus, and timing around endurance work.")
     if frame.empty:
         st.info("No strength activities match the current filters.")
         return
@@ -464,11 +471,16 @@ def strength_page(frame: pd.DataFrame, period_all: pd.DataFrame) -> None:
     span_weeks = max(1.0, (frame["started_at"].max() - frame["started_at"].min()).days / 7)
     endurance = period_all[period_all["sport"].isin(["cycling", "running", "swimming"])]
     proximity = _strength_proximity(frame, endurance)
-    cols = st.columns(4)
+    set_frame = strength_sets(frame["id"].astype(int).tolist())
+    summary = _gym_summary(set_frame)
+    cols = st.columns(5)
     cols[0].metric("Sessions", f"{len(frame)}")
     cols[1].metric("Time", f"{duration.sum() / 3600:.1f} h")
     cols[2].metric("Frequency", f"{len(frame) / span_weeks:.1f} / week")
     cols[3].metric("Within 24h endurance", f"{int((proximity['nearest endurance h'] <= 24).sum()) if not proximity.empty else 0}")
+    cols[4].metric("Logged volume", _kg_label(summary["volume_kg"]) if summary["counted_sets"] else "—")
+    _strength_note(summary)
+    _strength_groups(summary)
     tmp = frame.copy()
     tmp["week"] = tmp["started_at"].dt.tz_convert(None).dt.to_period("W-MON").dt.start_time
     weekly = tmp.groupby("week").agg(sessions=("id", "count"), duration=("moving_seconds", "sum")).reset_index()
@@ -486,19 +498,95 @@ def strength_page(frame: pd.DataFrame, period_all: pd.DataFrame) -> None:
             fig = go.Figure(go.Histogram(x=proximity["nearest endurance h"], nbinsx=12, marker_color="#67B7F7"))
             fig.update_layout(xaxis_title="Hours", yaxis_title="Strength sessions")
             st.plotly_chart(style_figure(fig), width="stretch")
-    st.subheader("Session proximity")
-    st.dataframe(proximity, width="stretch", hide_index=True)
-    set_frame = strength_sets(frame["id"].astype(int).tolist())
-    st.subheader("Exercises & sets")
+    section_header("Exercises & sets", "Select a session to inspect each exercise and its recorded sets.")
     if set_frame.empty:
         st.caption("No exercise-level set data was present in the imported source files.")
     else:
-        display = set_frame[["activity_started_at", "exercise_name", "set_number", "repetitions", "load_value", "load_unit"]].copy()
-        display["activity_started_at"] = pd.to_datetime(display["activity_started_at"], utc=True).dt.strftime("%d %b %Y")
-        display["exercise_name"] = display["exercise_name"].str.replace("_", " ").str.title()
-        st.dataframe(display, width="stretch", hide_index=True)
-        if display["load_unit"].isna().any():
-            st.caption("The supplied strength JSON contains load numbers but no weight unit; values are preserved without assuming kg or lb.")
+        available = frame[frame["id"].isin(set_frame["activity_id"])].sort_values("started_at", ascending=False)
+        choices = {
+            f"{row.started_at.strftime('%d %b %Y')} · {row.name or 'Gym session'} · #{int(row.id)}": int(row.id)
+            for row in available.itertuples()
+        }
+        selected = st.selectbox("Gym session", list(choices), key="strength-session")
+        selected_summary = _gym_summary(set_frame[set_frame["activity_id"] == choices[selected]])
+        _strength_readout(selected_summary)
+    with st.expander("Session proximity"):
+        st.dataframe(proximity, width="stretch", hide_index=True)
+
+
+def _kg_label(value: float) -> str:
+    return f"{value:,.0f} kg"
+
+
+def _gym_summary(set_frame: pd.DataFrame) -> dict:
+    # This athlete confirmed that missing units in the imported gym data are kg.
+    # Normalize before calling the summarizer so a running Streamlit process that
+    # still holds the previous imported module also renders correctly on rerun.
+    rows = set_frame.to_dict("records")
+    for row in rows:
+        unit = row.get("load_unit")
+        if unit is None or pd.isna(unit) or not str(unit).strip():
+            row["load_unit"] = "kg"
+    summary = summarize_strength(rows)
+    summary.setdefault("counted_sets", summary["sets"] - summary["excluded_sets"])
+    for exercise in summary["exercises"]:
+        exercise.setdefault("counted_sets", sum(item["volume_kg"] is not None for item in exercise["sets"]))
+        for item in exercise["sets"]:
+            item.setdefault("load_recorded", item["load_kg"] is not None)
+    return summary
+
+
+def _strength_note(summary: dict) -> None:
+    st.caption(
+        "Volume = sum of recorded reps × external load in kg; it is not training stress. "
+        "Imports without a recorded unit are treated as kg based on your confirmation. "
+        "Bodyweight and unrecorded loads are not estimated."
+        + (f" {summary['excluded_sets']} set(s) excluded from volume because reps, load, or unit is missing." if summary["excluded_sets"] else "")
+    )
+
+
+def _strength_groups(summary: dict) -> None:
+    if not summary["groups"]:
+        return
+    chips = "".join(
+        f'<span class="lab-muscle-chip">{escape(group)} <strong>{count} sets</strong></span>'
+        for group, count in summary["groups"]
+    )
+    st.markdown('<div class="lab-muscle-list">' + chips + '</div>', unsafe_allow_html=True)
+    st.caption("Primary muscle group inferred from exercise names; compound movements also train other muscles.")
+
+
+def _strength_readout(summary: dict) -> None:
+    st.markdown(
+        '<div class="lab-state-grid">'
+        + metric_tile("Logged volume", _kg_label(summary["volume_kg"]) if summary["counted_sets"] else "—")
+        + metric_tile("Sets", str(summary["sets"]))
+        + metric_tile("Reps", str(summary["reps"]))
+        + metric_tile("Exercises", str(len(summary["exercises"])))
+        + '</div>', unsafe_allow_html=True,
+    )
+    _strength_groups(summary)
+    _strength_note(summary)
+    cards = []
+    for exercise in summary["exercises"]:
+        rows = []
+        for item in exercise["sets"]:
+            reps = f"{item['reps']} reps" if item["reps"] is not None else "Reps unrecorded"
+            load = (f" × {item['load_kg']:g} kg" if item["load_kg"] is not None
+                    else " · unit unknown" if item["load_recorded"] else " · load unrecorded")
+            volume = _kg_label(item["volume_kg"]) if item["volume_kg"] is not None else "—"
+            rows.append(
+                '<div class="lab-set-row"><span>Set ' + escape(str(item["number"])) + ' · '
+                + escape(reps + load) + '</span><strong>' + escape(volume) + '</strong></div>'
+            )
+        cards.append(
+            '<article class="lab-exercise-card"><div class="lab-exercise-head"><div><small>'
+            + escape(exercise["group"]) + '</small><h4>' + escape(exercise["name"]) + '</h4></div>'
+            + '<strong>' + escape(_kg_label(exercise["volume_kg"]) if exercise["counted_sets"] else "—") + '</strong></div>'
+            + '<p>' + str(len(exercise["sets"])) + ' sets · ' + str(exercise["reps"]) + ' reps</p>'
+            + ''.join(rows) + '</article>'
+        )
+    st.markdown('<div class="lab-exercise-grid">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
 
 
 def _open_activity(activity_id: int) -> None:
@@ -595,19 +683,29 @@ def activity_detail_page(frame: pd.DataFrame) -> None:
             "SELECT * FROM workout_evaluations WHERE activity_id=?", (activity_id,)
         ).fetchone()
     cost = dict(cost_row) if cost_row else None
-    section_header("Coach analysis", "What this session cost and what the evidence supports.")
+    conclusion = build_session_conclusion(record, cost, dict(evaluation) if evaluation else None)
+    section_header("Coach conclusion", "Automatically generated from available evidence, not a message from your human coach.")
+    st.markdown(
+        '<div class="lab-insight"><strong>' + escape(conclusion.headline) + '</strong><br>'
+        + escape(conclusion.explanation) + '</div>',
+        unsafe_allow_html=True,
+    )
+    if conclusion.caveat:
+        st.caption(conclusion.caveat)
+    section_header("Training cost", "Separate cardiovascular, muscular, and intensity demands.")
     if cost:
         st.markdown(cost_indicator(cost), unsafe_allow_html=True)
-        evidence = json.loads(cost.get("evidence_json") or "[]")
-        st.markdown(
-            '<div class="lab-insight">' + escape(str(evidence[0] if evidence else
-            f"{cost['systemic_cost'].title()} systemic cost; {cost['muscular_cost']} muscular cost."))
-            + '</div>', unsafe_allow_html=True,
-        )
     else:
         st.caption("Training cost has not yet been classified.")
     if evaluation:
         st.caption(f"Execution: {str(evaluation['execution_status']).replace('_', ' ').title()} · {evaluation['confidence']} confidence")
+    if record["sport"] == "strength":
+        section_header("Gym session", "Exercise-by-exercise breakdown of recorded sets and external load.")
+        gym_sets = strength_sets([activity_id])
+        if gym_sets.empty:
+            st.caption("No exercise-level sets were present in this source.")
+        else:
+            _strength_readout(_gym_summary(gym_sets))
     section_header("Execution", "Interval work when the source contains identifiable segments.")
     if intervals:
         for interval in intervals[:6]:
@@ -693,12 +791,6 @@ def activity_detail_page(frame: pd.DataFrame) -> None:
             display["distance km"] = display["distance_m"] / 1000
             display = display.rename(columns={"lap_number": "lap", "avg_hr": "avg HR", "avg_power_w": "avg power", "avg_cadence": "avg cadence"})
             st.dataframe(display[["lap", "duration", "distance km", "avg HR", "avg power", "avg cadence"]], width="stretch", hide_index=True)
-        set_frame = strength_sets([activity_id])
-        if not set_frame.empty:
-            st.subheader("Strength sets")
-            display_sets = set_frame[["exercise_name", "set_number", "repetitions", "load_value", "load_unit"]].copy()
-            display_sets["exercise_name"] = display_sets["exercise_name"].str.replace("_", " ").str.title()
-            st.dataframe(display_sets, width="stretch", hide_index=True)
         comparable = comparable_activities(activity_id)
         st.subheader("Comparable sessions · previous 8 weeks")
         if comparable.empty:
@@ -716,13 +808,14 @@ def activity_detail_page(frame: pd.DataFrame) -> None:
 def data_page() -> None:
     page_intro("Local system", "Data & settings", "Import health, private storage, athlete thresholds, and recalculation controls.")
     sync = local_sync_status()
+    archive = local_archive_status()
     last_run = sync.get("last_run") or {}
     latest = sync.get("latest_activity") or {}
     section_header("Sync status", "The dashboard reads pipeline state; synchronization remains a separate, locked service.")
     sync_cols = st.columns(5)
     sync_cols[0].metric("Last sync", last_run.get("status", "Never").title(), sync.get("authentication", "UNKNOWN"))
     sync_cols[1].metric("New activities", int(last_run.get("discovered_count") or 0))
-    sync_cols[2].metric("Pending downloads", sync["pending_downloads"])
+    sync_cols[2].metric("Unrecovered detail", sync["pending_downloads"])
     sync_cols[3].metric("Pending imports", sync["pending_imports"])
     sync_cols[4].metric("Metadata-only", sync["metadata_only"])
     st.caption(
@@ -731,6 +824,21 @@ def data_page() -> None:
     )
     if last_run.get("error_summary"):
         st.warning(f"Last sync warning: {last_run['error_summary']}")
+    section_header("Archive", "All known activities are recorded; detailed source data varies by activity.")
+    archive_cols = st.columns(5)
+    archive_cols[0].metric("Known activities", archive["total_known_activities"])
+    archive_cols[1].metric("Detailed", archive["detailed_activities"])
+    archive_cols[2].metric("Metadata-only", archive["metadata_only_activities"])
+    archive_cols[3].metric("Detail coverage", f"{archive['detailed_data_coverage_percent']:.1f}%")
+    archive_cols[4].metric("Missing records", archive["missing_activity_records"])
+    st.caption(
+        f"{archive['detail_recovery_candidates']} metadata-only activities have unconfirmed export detail; "
+        f"{archive['non_strength_export_questions']} are non-strength. "
+        f"{archive['missing_dates']} manifest dates are missing."
+    )
+    if archive["failure_reasons"]:
+        with st.expander("Export-detail categories"):
+            st.json(archive["failure_reasons"], expanded=True)
     automation = local_automation_status()
     phone = automation["phone_access"]
     calendar = local_calendar_status()
@@ -745,17 +853,16 @@ def data_page() -> None:
     else:
         st.caption(phone["message"])
     st.caption(
-        f"Calendar events linked: {calendar['active_events']} · "
-        f"Last calendar sync: {calendar['last_synced'] or 'never'}"
+        f"Calendar: {calendar['active_activity_events']} completed · {calendar['active_events']} planned events linked. "
+        f"Latest completed-event sync: {calendar['activities_last_synced'] or 'never'} · "
+        f"Latest planned-event sync: {calendar['last_synced'] or 'never'}"
     )
-    quality = data_quality()
-    cols = st.columns(5)
-    cols[0].metric("Activities", f"{quality.get('activities', 0):,}")
-    cols[1].metric("Trackpoints", f"{quality.get('trackpoints', 0):,}")
-    cols[2].metric("Missing HR", f"{quality.get('missing_hr', 0):,}")
-    cols[3].metric("Cycling without power", f"{quality.get('cycling_missing_power', 0):,}")
-    cols[4].metric("Missing distance", f"{quality.get('missing_distance', 0):,}")
     ingestion = ingestion_quality_report()
+    severities = ingestion["severity_counts"]
+    section_header("Data quality", "Important issues first; normal missing sensors and recording pauses are not warnings.")
+    cols = st.columns(4)
+    for column, level in zip(cols, ("error", "warning", "advisory", "info")):
+        column.metric(level.title(), severities[level])
     report_left, report_right = st.columns(2)
     with report_left:
         st.subheader("Activities by sport")
@@ -782,11 +889,13 @@ def data_page() -> None:
         width="stretch",
         hide_index=True,
     )
-    if ingestion["suspicious_activities"]:
-        st.subheader("Suspicious activities")
-        suspicious = pd.DataFrame(ingestion["suspicious_activities"])
-        suspicious["flags"] = suspicious["flags"].map(lambda value: ", ".join(value))
-        st.dataframe(suspicious, width="stretch", hide_index=True)
+    if ingestion["issues"]:
+        issues = pd.DataFrame(ingestion["issues"])
+        for level in ("error", "warning", "advisory", "info"):
+            subset = issues[issues["severity"] == level]
+            if not subset.empty:
+                with st.expander(f"{level.title()} · {len(subset)}", expanded=level in {"error", "warning"}):
+                    st.dataframe(subset[["activity_id", "code", "message"]], width="stretch", hide_index=True)
     left, right = st.columns([1.35, 1])
     with left:
         st.subheader("Import history")

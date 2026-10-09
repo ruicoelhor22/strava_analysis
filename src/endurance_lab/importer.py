@@ -135,6 +135,9 @@ def import_file(source: str | Path, database: str | Path | None = None) -> Impor
                 activity_id = int(match["id"])
                 existing = _load_activity(connection, activity_id)
                 merged, enriched, select_new = _merge_activities(existing, parsed)
+                if int(match["metadata_only"]):
+                    enriched = True
+                    select_new = True
                 if enriched:
                     _replace_activity(
                         connection,
@@ -263,7 +266,7 @@ def _replace_activity(
     connection.execute(
         """UPDATE activities SET
             stable_id = ?, source_activity_id = COALESCE(?, source_activity_id),
-            identity_key = ?, quality_score = ?, sport = ?, name = ?, started_at = ?,
+            identity_key = ?, quality_score = ?, metadata_only = 0, sport = ?, name = ?, started_at = ?,
             ended_at = ?, elapsed_seconds = ?, moving_seconds = ?, distance_m = ?,
             ascent_m = ?, descent_m = ?, calories = ?, avg_hr = ?, max_hr = ?,
             avg_speed_mps = ?, max_speed_mps = ?, avg_cadence = ?, max_cadence = ?,

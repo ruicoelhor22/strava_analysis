@@ -24,6 +24,15 @@ NGROK_CONFIG = "training_data/auth/ngrok.yml"
 NGROK_POLICY = "training_data/auth/ngrok-policy.yml"
 
 
+def restart_dashboard() -> None:
+    """Restart only this repository's dashboard; leave the phone tunnel intact."""
+    if os.name != 'nt':
+        raise RuntimeError('Automatic dashboard restart is currently Windows-only')
+    subprocess.run(['powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',
+                    str(PROJECT_ROOT/'scripts'/'restart_dashboard.ps1')],
+                   cwd=PROJECT_ROOT,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
+
+
 @dataclass
 class TaskInstallResult:
     sync_task: str

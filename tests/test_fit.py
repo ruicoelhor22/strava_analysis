@@ -9,8 +9,9 @@ from garmin_fit_sdk import Encoder, Profile
 
 from endurance_lab.analytics import analyze_database
 from endurance_lab.db import connect
-from endurance_lab.fit import parse_fit, semicircles_to_degrees
+from endurance_lab.fit import _collapse_micro_sessions, parse_fit, semicircles_to_degrees
 from endurance_lab.importer import import_file
+from endurance_lab.models import ParsedActivity, Trackpoint
 
 
 def test_fit_parser_extracts_units_coordinates_power_hr_cadence_and_laps():
@@ -40,6 +41,22 @@ def test_fit_parser_extracts_units_coordinates_power_hr_cadence_and_laps():
 def test_fit_semicircle_conversion():
     assert semicircles_to_degrees(2**30) == pytest.approx(90.0)
     assert semicircles_to_degrees(-(2**29)) == pytest.approx(-45.0)
+
+
+def test_fit_micro_sessions_do_not_create_extra_canonical_activities():
+    start = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    fragments = [
+        ParsedActivity(f"fit:hash:{i}", None, sport, start + timedelta(seconds=i),
+                       elapsed_seconds=1, distance_m=6, trackpoints=[Trackpoint(sequence=0)])
+        for i, sport in enumerate(("swimming", "other"))
+    ]
+    ride = ParsedActivity("fit:hash:2", None, "cycling", start + timedelta(seconds=2),
+                          elapsed_seconds=2108, distance_m=17089)
+    collapsed = _collapse_micro_sessions([*fragments, ride], "18585184931.fit")
+    assert len(collapsed) == 1
+    assert collapsed[0].source_activity_id == "18585184931"
+    assert collapsed[0].stable_id == "strava:18585184931"
+    assert len(_collapse_micro_sessions([fragments[0], ride], "ride.fit")) == 2
 
 
 def test_fit_cycling_flows_through_existing_analytics(monkeypatch):

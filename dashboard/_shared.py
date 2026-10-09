@@ -49,7 +49,7 @@ SPORT_MARKERS = {
 
 def configure_page() -> None:
     st.set_page_config(
-        page_title="Endurance Lab", page_icon="↗", layout="wide",
+        page_title="Endurance Lab", page_icon=str(ROOT / "assets" / "favicon.png"), layout="wide",
         initial_sidebar_state="collapsed",
     )
     st.markdown(

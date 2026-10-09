@@ -191,7 +191,8 @@ def strength_sets(
     activity_ids: Iterable[int] | None = None, database: str | Path | None = None
 ) -> pd.DataFrame:
     ids = list(activity_ids or [])
-    query = """SELECT s.*, a.started_at AS activity_started_at, a.name AS activity_name
+    query = """SELECT s.*, a.started_at AS activity_started_at, a.name AS activity_name,
+                      a.device AS activity_device
                FROM strength_sets s JOIN activities a ON a.id = s.activity_id"""
     params: list[object] = []
     if ids:

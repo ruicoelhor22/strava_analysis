@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from endurance_lab.db import connect, init_db
+from endurance_lab.training_decisions import effective_session, training_decisions, is_rest_session
+from endurance_lab.plan_lifecycle import lifecycle_rows, resolve_session, revision_status
 
 
 SESSION_QUERY = """
@@ -38,7 +40,7 @@ LEFT JOIN (
 ) ms ON ms.planned_session_id = p.id
 LEFT JOIN activities a ON a.id = m.activity_id
 LEFT JOIN derived_activity_metrics d ON d.activity_id = a.id
-WHERE p.active = 1
+WHERE p.active = 1 OR EXISTS (SELECT 1 FROM training_decisions td WHERE td.planned_session_id=p.id)
 """
 
 
@@ -52,12 +54,6 @@ def planned_sessions(
     query = SESSION_QUERY
     params: list[Any] = []
     clauses = []
-    if start is not None:
-        clauses.append("p.planned_date >= ?")
-        params.append(_date(start).isoformat())
-    if end is not None:
-        clauses.append("p.planned_date <= ?")
-        params.append(_date(end).isoformat())
     if clauses:
         query += " AND " + " AND ".join(clauses)
     query += " ORDER BY p.planned_date, p.id"
@@ -66,11 +62,61 @@ def planned_sessions(
         target_rows = connection.execute(
             "SELECT * FROM planned_session_targets ORDER BY planned_session_id, target_type"
         ).fetchall()
+        prescriptions = {r['planned_session_id']:dict(r) for r in connection.execute("SELECT * FROM workout_prescriptions WHERE status='active'")}
     targets: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for target in target_rows:
         targets[int(target["planned_session_id"])].append(dict(target))
     current = today or date.today()
-    return [_decorate(row, targets.get(int(row["id"]), []), current) for row in rows]
+    decisions = training_decisions(database)
+    lifecycle = lifecycle_rows(database)
+    results=[]
+    for row in rows:
+        row['targets'] = targets.get(row['id'],[])
+        layers = resolve_session(row,prescriptions.get(row['id']),decisions.get(row['id']),lifecycle.get(row['id']))
+        projected = effective_session(row,decisions.get(row['id']))
+        if layers['effective'] and not decisions.get(row['id']):
+            projected = effective_session(row,{'workout':layers['effective'],'reason':'App recommendation'})
+            projected.pop('training_decision',None)
+            projected['workbook_actual_json']=row.get('workbook_actual_json')
+            projected['source_status']=row.get('source_status')
+            prescribed_targets=layers['effective'].get('targets') or {}
+            projected['targets']=[t for t in row['targets'] if prescribed_targets.get(t['target_type'])==t['raw_text']]
+        projected.update(layers)
+        projected['lifecycle_state'] = layers['lifecycle']
+        if decisions.get(row['id'],{}).get('action')=='SKIP': projected['decision_skipped']=True
+        effective_day = _date(projected['planned_date'])
+        if start is not None and effective_day<_date(start): continue
+        if end is not None and effective_day>_date(end): continue
+        # A move crossing a week boundary belongs to the destination week.
+        if projected['planned_date']!=row['planned_date']:
+            monday = effective_day-timedelta(days=effective_day.weekday())
+            projected['week_start']=monday.isoformat()
+        results.append(_decorate(projected,projected.get('targets',[]),current))
+    return sorted(results,key=lambda r:(r['planned_date'],r['id']))
+
+
+def actual_training_days(database=None, start=None, end=None) -> dict[str,list[dict]]:
+    """Actual day evidence is separate from completion of a planned workout."""
+    from datetime import time, timezone
+    from zoneinfo import ZoneInfo
+    from endurance_lab.config import load_athlete_config
+    from endurance_lab.plan_matching import extra_activity_ids
+    zone=ZoneInfo(load_athlete_config().get('athlete',{}).get('timezone','UTC'))
+    first=_date(start);last=_date(end)
+    utc_start=datetime.combine(first,time.min,zone).astimezone(timezone.utc).isoformat()
+    utc_end=datetime.combine(last+timedelta(days=1),time.min,zone).astimezone(timezone.utc).isoformat()
+    extras=extra_activity_ids(database)
+    result=defaultdict(list)
+    with connect(database) as connection:
+        rows=connection.execute("""SELECT a.id,a.name,a.sport,a.started_at,a.distance_m,a.metadata_only,
+                   COALESCE(NULLIF(a.moving_seconds,0),a.elapsed_seconds,0) AS duration_seconds,
+                   (SELECT m.planned_session_id FROM planned_activity_matches m WHERE m.activity_id=a.id AND m.is_selected=1 LIMIT 1) AS linked_session_id
+            FROM activities a WHERE a.started_at>=? AND a.started_at<? ORDER BY a.started_at""",(utc_start,utc_end)).fetchall()
+    for row in rows:
+        item=dict(row);day=datetime.fromisoformat(item['started_at']).astimezone(zone).date().isoformat()
+        item['role']='extra' if item['id'] in extras else 'linked' if item['linked_session_id'] else 'unplanned'
+        result[day].append(item)
+    return dict(result)
 
 
 def weekly_adherence(
@@ -101,7 +147,7 @@ def weekly_adherence(
             ).fetchall()
             completed = sum(item["completion_state"] in {"completed", "completed_metadata", "partial"} for item in items)
             missed = sum(item["completion_state"] == "missed" for item in items)
-            planned_duration = sum(float(item["planned_duration_seconds"] or 0) for item in items)
+            planned_duration = sum(float(item["planned_duration_seconds"] or 0) for item in items if _counts_as_planned(item))
             actual_duration = sum(float(row["duration_seconds"] or 0) for row in actual_rows)
             planned_distance: dict[str, float] = defaultdict(float)
             actual_distance: dict[str, float] = defaultdict(float)
@@ -110,14 +156,14 @@ def weekly_adherence(
             for row in actual_rows:
                 actual_distance[str(row["sport"])] += float(row["distance_m"] or 0)
             planned_load_values = [float(item["planned_load"]) for item in items if item["planned_load"] is not None]
-            key_items = [item for item in items if str(item.get("priority") or "").startswith("A")]
+            key_items = [item for item in items if str(item.get("priority") or "").startswith("A") and _counts_as_planned(item)]
             result.append(
                 {
                     "week_start": week_start,
                     "week_end": week_end.isoformat(),
                     "phase": items[0].get("phase_name"),
                     "week_type": items[0].get("week_type"),
-                    "planned_sessions": len(items),
+                    "planned_sessions": sum(_counts_as_planned(item) for item in items),
                     "completed_sessions": completed,
                     "missed_sessions": missed,
                     "unmatched_activities": sum(int(row["unmatched"]) for row in actual_rows),
@@ -132,12 +178,12 @@ def weekly_adherence(
                         item["completion_state"] in {"completed", "completed_metadata", "partial"}
                         for item in key_items
                     ),
-                    "strength_sessions_planned": sum(item["sport"] == "strength" for item in items),
+                    "strength_sessions_planned": sum(item["sport"] == "strength" and _counts_as_planned(item) for item in items),
                     "strength_sessions_completed": sum(
                         item["sport"] == "strength" and item["completion_state"] in {"completed", "completed_metadata", "partial"}
                         for item in items
                     ),
-                    "completion_percentage": completed / len(items) if items else None,
+                    "completion_percentage": completed / sum(_counts_as_planned(item) for item in items) if any(_counts_as_planned(item) for item in items) else None,
                 }
             )
     return result
@@ -162,6 +208,7 @@ def plan_status(database: str | Path | None = None, today: date | None = None) -
         None,
     )
     return {
+        **revision_status(database),
         "plan": dict(plan) if plan else None,
         "sessions": len(sessions),
         "matches": dict(match_counts),
@@ -181,7 +228,7 @@ def reconcile_plan(database: str | Path | None = None, today: date | None = None
         "unmatched": sum(not item.get("match_status") for item in sessions),
         "unmatched_due": sum(
             not item.get("match_status") and date.fromisoformat(item["planned_date"]) <= current
-            and item["completion_state"] not in {"completed_metadata"}
+            and item["completion_state"] not in {"completed_metadata", "rest"}
             for item in sessions
         ),
         "upcoming": sum(item["completion_state"] == "upcoming" for item in sessions),
@@ -198,10 +245,16 @@ def _decorate(row: dict[str, Any], targets: list[dict[str, Any]], today: date) -
     actual = _json(row.get("workbook_actual_json"))
     planned_date = date.fromisoformat(str(row["planned_date"]))
     source_status = str(row.get("source_status") or "").lower()
-    if row.get("activity_id"):
+    if row.get('decision_skipped'):
+        state = 'skipped'
+    elif is_rest_session(row):
+        state = "rest"
+    elif row.get("activity_id"):
         state = "partial" if _duration_class(row) == "under" and _duration_ratio(row) < 0.7 else "completed"
     elif actual.get("Actual Session") and source_status in {"completed", "modified"}:
         state = "completed_metadata"
+    elif row.get('lifecycle_state') in {'draft','incomplete','cancelled'} and not row.get('athlete_decision'):
+        state = row['lifecycle_state']
     elif source_status == "skipped":
         state = "missed"
     elif planned_date < today and _is_optional_unstructured(row):
@@ -220,6 +273,10 @@ def _decorate(row: dict[str, Any], targets: list[dict[str, Any]], today: date) -
     row["intensity_adherence"] = _intensity_class(row, targets)
     row["matching_reason"] = _json(row.get("reason_json"))
     return row
+
+
+def _counts_as_planned(item):
+    return not is_rest_session(item) and item['completion_state'] not in {'skipped','draft','incomplete','cancelled'}
 
 
 def _actual_duration(row) -> float | None:

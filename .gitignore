@@ -44,12 +44,13 @@ strava-session*.json
 htmlcov/
 .ipynb_checkpoints/
 .streamlit/
-# Screenshots are private by default; only the four approved README images are public.
+# Images are private by default; only approved README images and the favicon are public.
 assets/*
 !assets/home.png
 !assets/plan.png
 !assets/activity-detail.png
 !assets/performance.png
+!assets/favicon.png
 
 # OS / editors
 .DS_Store

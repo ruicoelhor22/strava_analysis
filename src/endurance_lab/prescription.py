@@ -42,7 +42,7 @@ def prescribe_day(
     return [
         item for item in adjust_week(
             prescription_date, database, as_of=prescription_date, persist=persist
-        ) if item.date == prescription_date
+        ) if item.date == prescription_date or (item.action=='MOVE' and item.original and item.original.get('date')==prescription_date.isoformat())
     ]
 
 

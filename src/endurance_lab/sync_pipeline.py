@@ -17,13 +17,15 @@ from endurance_lab.google_calendar import (
 from endurance_lab.importer import import_file
 from endurance_lab.metadata_activities import MetadataActivity, upsert_metadata_activity
 from endurance_lab.plan_matching import match_training_plan
+from endurance_lab.plan_revisions import sync_plan_revision
+from endurance_lab.plan_lifecycle import emit_event
 from endurance_lab.quality import ingestion_quality_report
 from endurance_lab.session_cost import session_cost
 from endurance_lab.strava_auth import PlaywrightTransport, check_authentication
 from endurance_lab.strava_discovery import DiscoveryError, StravaDiscovery, default_discovery_window
 from endurance_lab.strava_export import StravaDownloader, find_valid_download, reconcile
 from endurance_lab.strava_manifest import DEFAULT_DOWNLOAD_DIR, DEFAULT_MANIFEST, load_manifest, resolve_private_path, save_manifest
-from endurance_lab.sync_lock import SyncAlreadyRunning, SyncLock
+from endurance_lab.sync_lock import SyncAlreadyRunning, SyncLock, lock_owner
 from endurance_lab.weekly_adjustment import adjust_week
 
 
@@ -36,6 +38,7 @@ class SyncOptions:
     skip_coaching: bool = False
     skip_calendar: bool = False
     force_discovery: bool = False
+    full_refresh: bool = False
     manifest: str | Path = DEFAULT_MANIFEST
     downloads: str | Path = DEFAULT_DOWNLOAD_DIR
     database: str | Path | None = None
@@ -97,15 +100,22 @@ class SyncPipeline:
         init_db(options.database)
         try:
             with SyncLock():
-                resumable = None if options.dry_run or options.force_discovery else _resumable_coaching_run(
+                if not options.dry_run:
+                    _recover_abandoned_runs(options.database)
+                resumable = None if options.dry_run or options.force_discovery or options.full_refresh else _resumable_local_run(
                     options.database, date_from, date_to
                 )
                 if resumable:
-                    result = _resume_coaching(resumable, options)
-                    logger.info("sync resumed coaching run_id=%s", result.run_id)
+                    result = _resume_local_stages(resumable, options)
+                    logger.info("sync resumed local stages run_id=%s", result.run_id)
                     return result
                 if not options.dry_run:
                     result.run_id = _new_run(options, date_from, date_to)
+                plan_update = sync_plan_revision(options.database,dry_run=options.dry_run)
+                result.reconciliation['plan_revision'] = plan_update
+                _stage(result.run_id,'plan_revision',plan_update['status'],plan_update,options.database)
+                if plan_update['status']=='failed':
+                    result.warnings.append('Plan import failed. Existing valid plan preserved: '+plan_update.get('error',''))
                 logger.info("sync started run_id=%s from=%s to=%s", result.run_id, date_from, date_to)
                 with self.transport_factory(options.profile, headless=True) as transport:
                     auth = self.authentication_checker(transport.context)
@@ -180,8 +190,11 @@ class SyncPipeline:
                     manifest, downloads, candidate_ids, options.database
                 )
                 result.imports = import_summary
-                result.downloads["unavailable_metadata_fallback"] = import_summary["metadata_only"]
-                result.downloads["failed"] = max(0, int(result.downloads["failed"]) - import_summary["metadata_only"])
+                result.downloads["metadata_summaries_stored"] = import_summary["metadata_only"]
+                if result.downloads.get('failed'):
+                    result.warnings.append(f"{result.downloads['failed']} detail export(s) unresolved; verified activity summaries are retained where available, without inventing sensor data.")
+                if import_summary['errors']:
+                    result.warnings.append(f"{import_summary['errors']} activity import(s) failed; inspect sync status.")
                 _stage(result.run_id, "import", "success", result.imports, options.database)
 
                 quality = ingestion_quality_report(options.database)
@@ -191,6 +204,11 @@ class SyncPipeline:
                 }
                 _stage(result.run_id, "quality", "success", result.quality, options.database)
 
+                if options.full_refresh:
+                    with connect(options.database) as connection:
+                        imported_ids = sorted(set(imported_ids) | {int(r[0]) for r in connection.execute(
+                            "SELECT id FROM activities WHERE substr(started_at,1,10)>=?",
+                            ((date.today()-timedelta(days=35)).isoformat(),))})
                 if imported_ids:
                     analyzed = analyze_database(options.database, activity_ids=imported_ids)
                 else:
@@ -202,6 +220,7 @@ class SyncPipeline:
                 match_counts = match_training_plan(options.database)
                 after_matches = _selected_matches(options.database)
                 result.reconciliation = {
+                    'plan_revision':plan_update,
                     "newly_matched": max(0, after_matches - before_matches),
                     "selected_matches": after_matches,
                     "match_counts": match_counts,
@@ -220,9 +239,8 @@ class SyncPipeline:
                     _stage(result.run_id, "coaching", "failed", {}, options.database, "COACHING_ERROR", str(exc))
                     raise RuntimeError(f"coaching update failed: {exc}") from exc
                 result.calendar = _update_calendar(result, options)
-                result.status = "success"
-                _finish_run(result, options.database)
-                logger.info("sync success run_id=%s", result.run_id)
+                result.status = "partial" if result.calendar.get("error_code") or import_summary['errors'] else "success"
+                logger.info("sync %s run_id=%s", result.status, result.run_id)
                 return result
         except SyncAlreadyRunning as exc:
             result.status, result.error_code, result.error_summary = "failed", "SYNC_LOCKED", str(exc)
@@ -230,9 +248,19 @@ class SyncPipeline:
             result.status, result.error_code, result.error_summary = "stopped", exc.code, str(exc)
         except Exception as exc:
             result.status, result.error_code, result.error_summary = "failed", _classify_error(exc), str(exc)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            result.status, result.error_code, result.error_summary = "interrupted", "INTERRUPTED", type(exc).__name__
+            raise
+        finally:
+            if result.run_id and not options.dry_run:
+                if result.status == "running":
+                    result.status, result.error_code = "interrupted", "INTERRUPTED"
+                _finish_run(result, options.database)
+                if result.error_code:
+                    with connect(options.database) as connection:
+                        emit_event(connection,'SYNC_FAILED',{'run_id':result.run_id,'code':result.error_code},key=f'sync-failed:{result.run_id}')
+                        connection.commit()
         logger.error("sync stopped code=%s error=%s", result.error_code, result.error_summary)
-        if result.run_id:
-            _finish_run(result, options.database)
         return result
 
 
@@ -244,6 +272,10 @@ def sync_status(database: str | Path | None = None, manifest_path: str | Path = 
     rows = load_manifest(manifest)
     with connect(database) as connection:
         run = connection.execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        last_stage = connection.execute(
+            "SELECT stage,status,finished_at FROM sync_run_stages WHERE sync_run_id=? ORDER BY id DESC LIMIT 1",
+            (run["id"],),
+        ).fetchone() if run else None
         success = connection.execute(
             "SELECT * FROM sync_runs WHERE status='success' ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -270,9 +302,25 @@ def sync_status(database: str | Path | None = None, manifest_path: str | Path = 
         and row.strava_id not in imported_source_ids
         for row in rows
     )
+    displayed_run = dict(run) if run else None
+    if displayed_run:
+        displayed_run["last_stage"] = dict(last_stage) if last_stage else None
+        if displayed_run["status"] == "running" and not lock_owner()[1]:
+            last_touch = (last_stage["finished_at"] if last_stage else None) or displayed_run["started_at"]
+            try:
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(last_touch)
+            except (TypeError, ValueError):
+                age = timedelta(hours=1)
+            if age > timedelta(minutes=2):
+                displayed_run["status"] = "interrupted"
+                displayed_run["error_summary"] = (
+                    "Sync process is no longer running; "
+                    f"last stage: {last_stage['stage'] if last_stage else 'none'}. "
+                    "The next sync can safely resume local work."
+                )
     return {
         "database": "OK",
-        "last_run": dict(run) if run else None,
+        "last_run": displayed_run,
         "last_successful_sync": success["finished_at"] if success else None,
         "latest_activity": dict(latest) if latest else None,
         "pending_downloads": pending_downloads,
@@ -312,7 +360,9 @@ def _import_and_fallback(manifest, downloads, candidate_ids, database):
                 row.import_status = "imported"
                 _update_db_metadata(row, database)
             continue
-        if _export_unavailable(row) and row.activity_date:
+        verified_summary = (row.discovery_source == 'strava_training_activities'
+                            and row.activity_date and _number(row.duration_seconds) is not None)
+        if (_export_unavailable(row) or verified_summary) and row.activity_date:
             activity_id = upsert_metadata_activity(
                 MetadataActivity(
                     row.strava_id, datetime.fromisoformat(row.activity_date), row.sport,
@@ -321,10 +371,14 @@ def _import_and_fallback(manifest, downloads, candidate_ids, database):
                 ),
                 database,
             )
-            row.download_status = "metadata_only"
+            # Failed detail export is still unresolved and retryable. A verified
+            # summary counts toward actual volume even when the export is HTML.
+            if _export_unavailable(row):
+                row.download_status = "metadata_only"
             row.import_status = "imported"
             row.db_activity_id = str(activity_id)
-            row.result_status = "original and TCX unavailable; metadata-only record stored"
+            if row.download_status == 'metadata_only':
+                row.result_status = "original and TCX unavailable; metadata-only record stored"
             imported_ids.append(activity_id)
             counts["metadata_only"] += 1
             _update_db_metadata(row, database)
@@ -334,9 +388,10 @@ def _import_and_fallback(manifest, downloads, candidate_ids, database):
 
 def _export_unavailable(row) -> bool:
     text = f"{row.result_status} {row.error}".lower()
-    return row.download_status == "failed" and (
-        "http 404" in text or "not an activity export" in text or "unsupported binary" in text
-    ) and "network error" not in text
+    # HTML 200 may be a login/challenge page, not proof that a workout has no
+    # export. Only two explicit missing endpoints resolve the export question.
+    return (row.download_status == "failed"
+            and "original: http 404" in text and "tcx: http 404" in text)
 
 
 def _new_run(options, date_from, date_to) -> int:
@@ -351,14 +406,68 @@ def _new_run(options, date_from, date_to) -> int:
         return int(cursor.lastrowid)
 
 
-def _resumable_coaching_run(database, date_from, date_to):
+def _recover_abandoned_runs(database) -> list[int]:
+    """Called only while this process holds the exclusive sync lock."""
+    recovered: list[int] = []
+    with connect(database) as connection:
+        runs = connection.execute("SELECT id,requested_from,requested_to FROM sync_runs WHERE status='running'").fetchall()
+        for run in runs:
+            run_id = int(run["id"])
+            stage_rows = connection.execute(
+                "SELECT stage,status,checkpoint_json FROM sync_run_stages WHERE sync_run_id=? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+            stages = {row["stage"]: row["status"] for row in stage_rows}
+            checkpoints = {}
+            for row in stage_rows:
+                try:
+                    checkpoints[row["stage"]] = json.loads(row["checkpoint_json"] or "{}")
+                except json.JSONDecodeError:
+                    checkpoints[row["stage"]] = {}
+            required = ("authentication", "discovery", "downloads", "import", "quality",
+                        "analytics", "reconciliation", "coaching")
+            complete = all(stages.get(stage) == "success" for stage in required)
+            complete = complete and stages.get("calendar") in {"success", "skipped"}
+            failed = any(status == "failed" for status in stages.values())
+            status = "success" if complete else "partial" if failed else "interrupted"
+            last_stage = next((name for name in reversed(tuple(stages)) if stages[name] == "success"), "none")
+            recovered_result = SyncResult(
+                status=status, run_id=run_id,
+                window_from=run["requested_from"], window_to=run["requested_to"],
+                discovery=checkpoints.get("discovery") or {}, downloads=checkpoints.get("downloads") or {},
+                imports=checkpoints.get("import") or {}, quality=checkpoints.get("quality") or {},
+                reconciliation=checkpoints.get("reconciliation") or {},
+                coaching=checkpoints.get("coaching") or {}, calendar=checkpoints.get("calendar") or {},
+                error_code=None if complete else "INTERRUPTED",
+                error_summary=None if complete else f"Previous process ended without finalizing; last completed stage: {last_stage}",
+            )
+            connection.execute(
+                """UPDATE sync_runs SET status=?, finished_at=?, error_code=?, error_summary=?,
+                   discovered_count=?, downloaded_count=?, metadata_only_count=?, imported_count=?,
+                   matched_count=?, prescriptions_updated=?, summary_json=? WHERE id=?""",
+                (status, datetime.now(timezone.utc).isoformat(),
+                 recovered_result.error_code, recovered_result.error_summary,
+                 int(recovered_result.discovery.get("new", 0)),
+                 int(recovered_result.downloads.get("downloaded", 0)),
+                 int(recovered_result.imports.get("metadata_only", 0)),
+                 int(recovered_result.imports.get("new", 0)) + int(recovered_result.imports.get("upgraded", 0)),
+                 int(recovered_result.reconciliation.get("newly_matched", 0)),
+                 int(recovered_result.coaching.get("prescriptions_updated", 0)),
+                 json.dumps(recovered_result.to_dict(), default=str), run_id),
+            )
+            recovered.append(run_id)
+        connection.commit()
+    return recovered
+
+
+def _resumable_local_run(database, date_from, date_to):
     with connect(database) as connection:
         return connection.execute(
             """SELECT r.* FROM sync_runs r
-               WHERE r.status='failed' AND r.error_code='COACHING_ERROR'
+               WHERE r.status IN ('failed','partial','interrupted')
                  AND r.requested_from IS ? AND r.requested_to=?
-                 AND EXISTS (SELECT 1 FROM sync_run_stages s WHERE s.sync_run_id=r.id AND s.stage='reconciliation' AND s.status='success')
-                 AND NOT EXISTS (SELECT 1 FROM sync_run_stages s WHERE s.sync_run_id=r.id AND s.stage='coaching' AND s.status='success')
+                 AND EXISTS (SELECT 1 FROM sync_run_stages s WHERE s.sync_run_id=r.id AND s.stage='analytics' AND s.status='success')
+                 AND NOT EXISTS (SELECT 1 FROM sync_run_stages s WHERE s.sync_run_id=r.id AND s.stage='calendar' AND s.status IN ('success','skipped'))
                ORDER BY r.id DESC LIMIT 1""",
             (date_from.isoformat() if date_from else None, date_to.isoformat()),
         ).fetchone()
@@ -377,7 +486,7 @@ def _manifest_ids_in_window(manifest, date_from, date_to) -> set[str]:
     return selected
 
 
-def _resume_coaching(run, options) -> SyncResult:
+def _resume_local_stages(run, options) -> SyncResult:
     try:
         prior = json.loads(run["summary_json"] or "{}")
     except json.JSONDecodeError:
@@ -395,21 +504,51 @@ def _resume_coaching(run, options) -> SyncResult:
             "UPDATE sync_runs SET status='running', finished_at=NULL, error_code=NULL, error_summary=NULL WHERE id=?",
             (result.run_id,),
         )
+        stages = {
+            row["stage"]: (row["status"], json.loads(row["checkpoint_json"] or "{}"))
+            for row in connection.execute(
+                "SELECT stage,status,checkpoint_json FROM sync_run_stages WHERE sync_run_id=?", (result.run_id,)
+            )
+        }
         rows = connection.execute(
             "SELECT id FROM activities WHERE imported_at >= ? ORDER BY id", (run["started_at"],)
         ).fetchall()
         connection.commit()
     activity_ids = [int(row[0]) for row in rows]
     try:
-        result.coaching = _update_coaching(activity_ids, options)
-        _stage(result.run_id, "coaching", "success", result.coaching, options.database)
+        plan_update = sync_plan_revision(options.database)
+        if plan_update['changed']:
+            stages.pop('reconciliation',None); stages.pop('coaching',None); stages.pop('calendar',None)
+            result.reconciliation={};result.coaching={};result.calendar={}
+        if plan_update['status']=='failed': result.warnings.append('Plan import failed; previous valid plan preserved.')
+        _stage(result.run_id,'plan_revision',plan_update['status'],plan_update,options.database)
+        for field in ("discovery", "downloads", "imports", "quality", "reconciliation", "coaching", "calendar"):
+            stage = "import" if field == "imports" else field
+            if not getattr(result, field) and stage in stages and stages[stage][0] == "success":
+                setattr(result, field, stages[stage][1])
+        if stages.get("reconciliation", (None,))[0] != "success":
+            archive = reconcile(options.manifest, options.downloads, options.database)
+            before = _selected_matches(options.database)
+            match_counts = match_training_plan(options.database)
+            after = _selected_matches(options.database)
+            result.reconciliation = {
+                "newly_matched": max(0, after - before), "selected_matches": after,
+                "match_counts": match_counts, "manifest": archive["manifest"],
+                "downloaded": archive["downloaded"],
+                "imported_matching_manifest": archive["imported_matching_manifest"],
+                "pending_downloads": len(archive["missing_download_ids"]),
+                "pending_imports": len(archive["downloaded_not_imported_ids"]),
+            }
+            _stage(result.run_id, "reconciliation", "success", result.reconciliation, options.database)
+        if stages.get("coaching", (None,))[0] != "success":
+            result.coaching = _update_coaching(activity_ids, options)
+            _stage(result.run_id, "coaching", "success", result.coaching, options.database)
         result.calendar = _update_calendar(result, options)
-        result.status = "success"
-        _finish_run(result, options.database)
+        result.status = "partial" if result.calendar.get("error_code") else "success"
     except Exception as exc:
-        result.status, result.error_code, result.error_summary = "failed", "COACHING_ERROR", str(exc)
-        _stage(result.run_id, "coaching", "failed", {}, options.database, result.error_code, result.error_summary)
-        _finish_run(result, options.database)
+        failed_stage = "reconciliation" if stages.get("reconciliation", (None,))[0] != "success" and not result.reconciliation else "coaching"
+        result.status, result.error_code, result.error_summary = "failed", _classify_error(exc), str(exc)
+        _stage(result.run_id, failed_stage, "failed", {}, options.database, result.error_code, result.error_summary)
     return result
 
 
@@ -435,12 +574,20 @@ def _update_calendar(result: SyncResult, options: SyncOptions) -> dict[str, Any]
             "planned": planned,
             "activities": actual,
         }
+        if planned.get('errors') or actual.get('errors'):
+            value.update(error_code='CALENDAR_ERROR',error='Some calendar events failed. Inspect the calendar link errors and retry.')
+            result.warnings.append(value['error'])
+            _stage(result.run_id,'calendar','failed',value,options.database,value['error_code'],value['error'])
+            return value
         _stage(result.run_id, "calendar", "success", value, options.database)
         return value
-    except GoogleCalendarError as exc:
-        value = {"enabled": True, "error_code": exc.code, "error": str(exc)}
-        _stage(result.run_id, "calendar", "failed", value, options.database, exc.code, str(exc))
+    except Exception as exc:
+        code = exc.code if isinstance(exc, GoogleCalendarError) else "CALENDAR_ERROR"
+        value = {"enabled": True, "error_code": code, "error": str(exc)}
+        _stage(result.run_id, "calendar", "failed", value, options.database, code, str(exc))
         result.warnings.append(f"Google Calendar: {exc}")
+        if code=='GOOGLE_AUTH_REQUIRED':
+            result.warnings.append('Calendar authorization must be renewed: python -m endurance_lab calendar-login; then python -m endurance_lab update')
         return value
 
 
@@ -449,16 +596,36 @@ def _update_coaching(activity_ids, options) -> dict[str, Any]:
     prescriptions = []
     before_count = _prescription_count(options.database)
     if not options.skip_coaching:
-        affected_weeks = {date.today()}
+        affected_weeks = {date.today()+timedelta(days=offset) for offset in (0,7,14)}
         affected_weeks.update(_activity_dates(activity_ids, options.database))
+        affected_weeks = {value-timedelta(days=value.weekday()) for value in affected_weeks}
         for value in sorted(affected_weeks):
             prescriptions.extend(adjust_week(value, options.database, as_of=date.today(), persist=True))
     after_count = _prescription_count(options.database)
+    with connect(options.database) as connection:
+        revision=connection.execute("SELECT id,missing_dates_json FROM plan_revisions WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+        if revision:
+            for day in json.loads(revision['missing_dates_json']):
+                if date.today().isoformat()<=day<=(date.today()+timedelta(days=7)).isoformat():
+                    emit_event(connection,'MISSING_CONFIRMED_SESSION',{'date':day,'reason':'No finalized coach workout; no session invented.'},revision_id=revision['id'],key=f"missing:{revision['id']}:{day}")
+            for row in connection.execute("SELECT p.id,p.planned_date,l.state FROM planned_sessions p JOIN plan_session_lifecycle l ON l.planned_session_id=p.id WHERE p.active=1 AND l.state IN ('draft','incomplete') AND p.planned_date BETWEEN ? AND ?",(date.today().isoformat(),(date.today()+timedelta(days=7)).isoformat())):
+                emit_event(connection,'MISSING_CONFIRMED_SESSION',{'date':row['planned_date'],'state':row['state']},session_id=row['id'],revision_id=revision['id'],key=f"unconfirmed:{revision['id']}:{row['id']}")
+        connection.commit()
+    from endurance_lab.plan_adherence import weekly_adherence
+    monday=date.today()-timedelta(days=date.today().weekday())
+    weeks=weekly_adherence(options.database,start=monday-timedelta(days=7),end=monday+timedelta(days=6))
+    upcoming={item.planned_session_id:{
+        'date':item.date.isoformat(),'session_id':item.planned_session_id,'action':item.action,
+        'title':(item.prescribed or item.original or {}).get('title'),
+        'reason':item.reasons[0] if item.reasons else '',
+    } for item in prescriptions if date.today()<=item.date<=date.today()+timedelta(days=7)}
     return {
         "session_costs_updated": len(costs),
         "prescriptions_evaluated": len({item.prescription_id for item in prescriptions if item.prescription_id}),
         "prescriptions_updated": max(0, after_count - before_count),
         "skipped": options.skip_coaching,
+        "weeks": weeks,
+        "upcoming_decisions": sorted(upcoming.values(),key=lambda item:(item['date'],item['session_id'] or 0)),
     }
 
 

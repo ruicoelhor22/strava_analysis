@@ -8,15 +8,42 @@ from pathlib import Path
 from typing import Any
 
 from endurance_lab.db import connect, init_db
+from endurance_lab.training_decisions import effective_session, training_decisions, is_rest_session
+from endurance_lab.plan_lifecycle import lifecycle_rows
+
+
+def extra_activity_ids(database=None) -> set[int]:
+    with connect(database) as connection:
+        roles={}
+        for row in connection.execute("SELECT payload_json FROM plan_events WHERE event_type='ACTIVITY_ROLE_CHANGED' ORDER BY id"):
+            payload=json.loads(row[0]);roles[int(payload['activity_id'])]=payload['role']
+    return {activity_id for activity_id,role in roles.items() if role=='extra'}
+
+
+def mark_extra_activity(activity_id: int, note: str, database=None) -> None:
+    """Persist athlete-confirmed extra training without consuming a future plan."""
+    from endurance_lab.plan_lifecycle import emit_event
+    init_db(database)
+    with connect(database) as connection:
+        if not connection.execute('SELECT 1 FROM activities WHERE id=?',(activity_id,)).fetchone():
+            raise ValueError('Activity not found')
+        if connection.execute('SELECT 1 FROM planned_activity_matches WHERE activity_id=? AND is_selected=1',(activity_id,)).fetchone():
+            raise ValueError('Activity already completes a planned session; review its link before marking extra')
+        connection.execute("DELETE FROM planned_activity_matches WHERE activity_id=? AND is_selected=0 AND match_status!='manual'",(activity_id,))
+        emit_event(connection,'ACTIVITY_ROLE_CHANGED',{'activity_id':activity_id,'role':'extra','source':'athlete','note':note})
+        connection.commit()
 
 
 def match_training_plan(database: str | Path | None = None) -> dict[str, int]:
     init_db(database)
     now = datetime.now(timezone.utc).isoformat()
     counts: Counter[str] = Counter()
+    decisions = training_decisions(database)
+    lifecycle = lifecycle_rows(database)
+    extra_ids = extra_activity_ids(database)
     with connect(database) as connection:
         sessions = connection.execute(
-            "SELECT * FROM planned_sessions WHERE active = 1 ORDER BY planned_date, id"
+            "SELECT * FROM planned_sessions WHERE active = 1 OR EXISTS(SELECT 1 FROM training_decisions td WHERE td.planned_session_id=planned_sessions.id) ORDER BY planned_date, id"
         ).fetchall()
         manually_matched = {
             int(row[0]) for row in connection.execute(
@@ -28,20 +55,31 @@ def match_training_plan(database: str | Path | None = None) -> dict[str, int]:
                 "SELECT activity_id FROM planned_activity_matches WHERE match_status = 'manual' AND is_selected = 1"
             )
         }
+        assigned.update(extra_ids)
 
         exact: list[tuple[Any, Any]] = []
         remaining = []
         for session in sessions:
+            session = effective_session(dict(session), decisions.get(int(session["id"])))
             session_id = int(session["id"])
+            existing_match = connection.execute('SELECT a.started_at FROM planned_activity_matches m JOIN activities a ON a.id=m.activity_id WHERE m.planned_session_id=? AND m.is_selected=1',(session_id,)).fetchone()
+            if session_id not in manually_matched and existing_match and str(existing_match['started_at'])[:10] < date.today().isoformat():
+                counts['preserved'] += 1
+                assigned.update(int(r[0]) for r in connection.execute('SELECT activity_id FROM planned_activity_matches WHERE planned_session_id=? AND is_selected=1',(session_id,)))
+                continue
             if session_id in manually_matched:
                 counts["manual"] += 1
+                continue
+            if is_rest_session(session) or session.get('decision_skipped') or (session_id not in decisions and lifecycle.get(session_id,{}).get('state') in {'draft','incomplete','cancelled'}):
+                _replace_automatic_matches(connection, session_id)
+                counts["rest" if is_rest_session(session) else "not_confirmed"] += 1
                 continue
             actual = _json(session["workbook_actual_json"])
             source_id = str(actual.get("Strava Activity ID") or "").strip()
             activity = connection.execute(
                 "SELECT * FROM activities WHERE source_activity_id = ?", (source_id,)
             ).fetchone() if source_id else None
-            if activity:
+            if activity and int(activity['id']) not in extra_ids:
                 exact.append((session, activity))
                 assigned.add(int(activity["id"]))
             else:
@@ -79,12 +117,16 @@ def match_training_plan(database: str | Path | None = None) -> dict[str, int]:
                 counts["ambiguous"] += 1
             else:
                 status = "matched" if top_score >= 75 else "probable"
+                # An early workout several days before a future anchor may be
+                # extra work, not a replacement. Surface intent without silently
+                # consuming a future key session.
+                pending_reorder = top_reason.get('reordered_intent') and top_reason['actual_date'] < top_reason['planned_date'] and abs((date.fromisoformat(top_reason['actual_date'])-date.fromisoformat(top_reason['planned_date'])).days)>1
                 _insert_match(
-                    connection, session, top, top_score, "deterministic_score",
-                    status, top_reason, True, now,
+                    connection, session, top, top_score, "reordered_intent" if pending_reorder else "deterministic_score",
+                    "probable" if pending_reorder else status, top_reason, not pending_reorder, now,
                 )
-                assigned.add(int(top["id"]))
-                counts[status] += 1
+                if not pending_reorder: assigned.add(int(top["id"]))
+                counts['reordered_candidate' if pending_reorder else status] += 1
         connection.commit()
     for key in ("matched", "probable", "ambiguous", "unmatched", "manual"):
         counts.setdefault(key, 0)
@@ -121,10 +163,11 @@ def set_manual_match(
 
 def _candidates(connection, session, assigned: set[int]):
     planned = date.fromisoformat(str(session["planned_date"]))
-    start = (planned - timedelta(days=1)).isoformat()
-    end = (planned + timedelta(days=2)).isoformat()
+    monday = planned-timedelta(days=planned.weekday())
+    start = min(planned-timedelta(days=1),monday).isoformat()
+    end = max(planned+timedelta(days=2),monday+timedelta(days=7)).isoformat()
     rows = connection.execute(
-        """SELECT a.*, d.normalized_power_w, d.selected_load
+        """SELECT a.*, d.normalized_power_w, d.selected_load,d.intensity_factor,d.power_zones_json
            FROM activities a
            LEFT JOIN derived_activity_metrics d ON d.activity_id = a.id
            WHERE substr(a.started_at, 1, 10) >= ? AND substr(a.started_at, 1, 10) < ?
@@ -161,6 +204,21 @@ def _score(session, activity) -> tuple[float, dict[str, Any]]:
 
     planned_duration = _float(session["planned_duration_seconds"])
     actual_duration = _float(activity["moving_seconds"]) or _float(activity["elapsed_seconds"])
+    reordered_intent = False
+    if delta > 1:
+        # Widen dates only with corroborating workout purpose, sensor evidence
+        # and close duration. Duration alone must not satisfy threshold work.
+        text=' '.join(str(session.get(key) or '') for key in ('title','description','intensity','session_type')) if isinstance(session,dict) else ' '.join(str(session[key] or '') for key in ('title','description','intensity','session_type'))
+        zones=json.loads(activity['power_zones_json'] or '[]') if 'power_zones_json' in activity.keys() else []
+        aerobic_fraction=sum(zones[:2])/sum(zones) if zones and sum(zones)>0 else None
+        same_week=(planned_date-timedelta(days=planned_date.weekday()))==(actual_date-timedelta(days=actual_date.weekday()))
+        long_aerobic=(session['sport']=='cycling' and planned_duration and planned_duration>=7200
+                      and not re.search(r'threshold|interval|over.?under|vo2|tempo',text,re.I))
+        if not (same_week and long_aerobic and actual_duration and abs(actual_duration-planned_duration)/planned_duration<=0.25 and aerobic_fraction is not None and aerobic_fraction>=0.55):
+            return 0.0, {'signals':['No sufficiently strong reordered-workout evidence'],'planned_date':planned_date.isoformat(),'actual_date':actual_date.isoformat()}
+        score+=35
+        reordered_intent=True
+        signals.append(f"same-week long aerobic intent; {aerobic_fraction:.0%} power time in Z1/Z2 (+35)")
     if planned_duration and actual_duration:
         difference = abs(actual_duration - planned_duration) / planned_duration
         points = 15 if difference <= 0.10 else 10 if difference <= 0.25 else 4 if difference <= 0.50 else 0
@@ -190,6 +248,7 @@ def _score(session, activity) -> tuple[float, dict[str, Any]]:
         "actual_date": actual_date.isoformat(),
         "planned_sport": session["sport"],
         "actual_sport": activity["sport"],
+        "reordered_intent": reordered_intent,
     }
 
 

@@ -271,6 +271,7 @@ def derive_activity(
     activity: dict[str, Any], streams: list[dict[str, Any]], config: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[int, float]]:
     elapsed, power, hr, speed, moving = _resampled_streams(streams)
+    power, hr, speed = _sanitized_sensors(power, hr, speed)
     sport = str(activity.get("sport") or "other")
     output = power if sport == "cycling" else speed
     analysis_cfg = config.get("analysis", {})
@@ -339,6 +340,22 @@ def derive_activity(
         },
         best,
     )
+
+
+def _sanitized_sensors(
+    power: list[float | None], hr: list[float | None], speed: list[float | None]
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """Exclude clearly corrupted samples from derived metrics, never raw storage."""
+    clean_power = [value if value is None or 0 <= value <= 3000 else None for value in power]
+    clean_hr = [value if value is None or 30 <= value <= 240 else None for value in hr]
+    clean_speed = [value if value is None or 0 <= value <= 45 else None for value in speed]
+    for index in range(1, len(clean_hr) - 1):
+        previous, current, following = clean_hr[index - 1:index + 2]
+        if (previous is not None and current is not None and following is not None
+                and abs(current - previous) > 55 and abs(current - following) > 55
+                and abs(previous - following) <= 15):
+            clean_hr[index] = None
+    return clean_power, clean_hr, clean_speed
 
 
 def _resampled_streams(

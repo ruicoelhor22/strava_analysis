@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from io import BytesIO
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -92,8 +93,9 @@ def inspect_workbook(value: str | Path | None = None) -> dict[str, Any]:
 
 def parse_workbook(value: str | Path | None = None) -> ParsedTrainingPlan:
     source = discover_workbook(value)
-    values_book = load_workbook(source, data_only=True, read_only=False)
-    formulas_book = load_workbook(source, data_only=False, read_only=False)
+    source_bytes = source.read_bytes()
+    values_book = load_workbook(BytesIO(source_bytes), data_only=True, read_only=False)
+    formulas_book = load_workbook(BytesIO(source_bytes), data_only=False, read_only=False)
     if CALENDAR_SHEET not in values_book.sheetnames:
         raise ValueError(f"Workbook has no {CALENDAR_SHEET!r} sheet")
     calendar = values_book[CALENDAR_SHEET]
@@ -123,7 +125,7 @@ def parse_workbook(value: str | Path | None = None) -> ParsedTrainingPlan:
     weeks = _weeks(dated_rows)
     phases = _phases(dated_rows)
     snapshot = _workbook_snapshot(values_book, formulas_book)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    digest = hashlib.sha256(source_bytes).hexdigest()
     return ParsedTrainingPlan(
         source=source,
         name=source.stem.replace("_", " "),
@@ -144,10 +146,11 @@ def _sessions(rows: list[tuple[int, dict[str, Any]]]) -> list[PlannedSession]:
     for row_number, row in rows:
         title = _text(row.get("Planned Session"))
         sport_raw = _text(row.get("Sport"))
-        if not title or not sport_raw:
+        if not title and not sport_raw and not row.get("Planned Duration (min)") and not row.get("Detailed Prescription"):
             continue
+        title = title or "Workout not finalized"
         planned_date = row["Date"]
-        sport = normalize_plan_sport(sport_raw)
+        sport = normalize_plan_sport(sport_raw) if sport_raw else "other"
         workout_code = _text(row.get("Workout Code"))
         base_key = f"{planned_date.isoformat()}:{sport}:{_slug(workout_code or title)}"
         keys[base_key] += 1
