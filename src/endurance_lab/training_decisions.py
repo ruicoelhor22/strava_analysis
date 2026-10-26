@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime, timezone
 
 from endurance_lab.db import connect, init_db
@@ -156,4 +157,5 @@ def effective_session(session: dict, decision: dict | None) -> dict:
 
 
 def is_rest_session(session: dict) -> bool:
-    return bool(session.get("training_decision")) and session.get("sport") == "other" and not session.get("planned_duration_seconds")
+    explicit_rest = bool(session.get('training_decision')) or str(session.get('intensity') or '').lower()=='rest' or bool(re.search(r'\b(rest|recovery day)\b',str(session.get('title') or ''),re.I))
+    return session.get('sport')=='other' and not session.get('planned_duration_seconds') and explicit_rest

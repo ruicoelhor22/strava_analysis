@@ -198,6 +198,11 @@ def plan_status(database: str | Path | None = None, today: date | None = None) -
             "SELECT * FROM training_plans WHERE active = 1 ORDER BY imported_at DESC LIMIT 1"
         ).fetchone()
     match_counts = defaultdict(int)
+    if plan:
+        plan = dict(plan)
+        with connect(database) as connection:
+            bounds = connection.execute('SELECT MIN(date_start),MAX(date_end) FROM training_plans WHERE active=1').fetchone()
+        plan.update(date_start=bounds[0],date_end=bounds[1])
     state_counts = defaultdict(int)
     for session in sessions:
         match_counts[session.get("match_status") or "unmatched"] += 1

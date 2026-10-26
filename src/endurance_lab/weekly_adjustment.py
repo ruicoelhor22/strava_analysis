@@ -124,6 +124,9 @@ def _decide(session, sessions, actual, as_of, subjective, config) -> Prescriptio
     elif completed:
         reasons = ["The session is already completed; actual cost is used to adjust only the remaining week."]
         rules = ["actual_training_over_calendar_compliance"]
+    elif is_rest_session(session):
+        reasons = ["Planned rest remains rest; it does not require a recovery gate or a replacement workout."]
+        rules = ["preserve_planned_rest"]
     elif planned_date < as_of:
         action = "SKIP"
         reasons = ["The planned session has passed and is not automatically rescheduled as training debt."]
@@ -243,7 +246,7 @@ def _decide(session, sessions, actual, as_of, subjective, config) -> Prescriptio
                 rules.append('avoid_leg_damage_before_event')
                 reasons.append('Lower/full-body support strength within three days of the protected event adds avoidable muscular cost; omit it rather than replace it.')
         preceding_race = any(_is_race_session(s) and date.fromisoformat(s['planned_date'])==planned_date-timedelta(days=1) for s in sessions)
-        if preceding_race and priority!='A' and action not in {'REST','SKIP'}:
+        if preceding_race and priority!='A' and action not in {'REST','SKIP'} and not is_rest_session(session):
             action='CONDITIONAL';gate=_optional_gate(subjective,'Post-race recovery governs support training.')
             rules.append('post_race_recovery_gate')
             reasons.append('This follows a race/event; proceed only when recovery is acceptable, otherwise rest.')

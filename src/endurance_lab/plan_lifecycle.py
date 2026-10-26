@@ -84,14 +84,14 @@ def resolve_session(session, prescription=None, decision=None, lifecycle=None):
         if recommendation is None and prescription.get('prescribed_json'):
             recommendation = json.loads(prescription['prescribed_json'])
     effective = None
-    source = 'COACH'
+    source = 'APP PLAN' if session.get('source_sheet')=='App planning' else 'COACH'
     if decision:
         source = 'ME'
         if decision.get('action') != 'SKIP':
             effective = decision['workout']
     elif state in {'confirmed', 'completed'}:
         effective = recommendation or coach
-        source = 'ENDURANCE LAB' if recommendation else 'COACH'
+        source = 'ENDURANCE LAB' if recommendation else source
         if prescription and prescription.get('action') == 'SKIP': effective = None
     return {'coach_plan': coach, 'app_recommendation': recommendation, 'athlete_decision': decision,
             'effective': effective, 'effective_source': source, 'lifecycle': state,

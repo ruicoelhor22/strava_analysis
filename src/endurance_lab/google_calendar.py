@@ -596,7 +596,8 @@ def _active_prescriptions(database, start: date, end: date, *, calendar_id=None)
         if not workout or workout['date']<start.isoformat(): continue
         moved=bool(decisions.get(session['id']) and workout['date']!=session['planned_date']) or (prescription or {}).get('action')=='MOVE' or session['id'] in moved_by_coach
         if workout['date']>end.isoformat() and not (moved and session['id'] in linked_in_window): continue
-        provenance = f"Coach plan: {session['title']}."
+        label = 'App proposal' if session.get('source_sheet')=='App planning' else 'Coach plan'
+        provenance = f"{label}: {session['title']}."
         if prescription: provenance += f" App: {prescription['action']}."
         if layers['athlete_decision']:
             provenance += f" Athlete: {layers['athlete_decision']['action']}."

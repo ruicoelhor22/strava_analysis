@@ -49,6 +49,10 @@ These are modifiers to the existing cost/interference/priority/runway rules, not
 
 ## Calendar and events
 
+Explicitly requested app proposals can fill a dated gap without modifying the coach workbook. `app_planning.save_app_plan` validates one workout/rest entry per date, travel modality restrictions and no overlap with existing active sessions. It saves a separate, labelled app-proposal source, lifecycle snapshots and audit events. Repeating the same proposal is a no-op; edited proposals require explicit revision review rather than silent replacement. Coach-workbook refresh continues to use the coach source, not the supplemental JSON. Navigation keeps the combined active date range. A later coach plan overlapping an app proposal needs review; this is not automatic full-season plan generation.
+
+Zero-duration, explicitly labelled rest entries remain rest, including after key workouts; they are not conditional workouts requiring a readiness gate.
+
 An explicitly confirmed intervening rest day allows moderate, non-high-systemic strength interference to produce a gentle maintenance recommendation instead of automatically cancelling gym. High muscular cost and stronger fatigue gates remain conservative. This does not establish readiness: demanding or sore-muscle work is omitted, and no compensatory sets are added.
 
 App and calendar resolve the same serialized effective prescription. Planned sync reconciles the previous seven days as well as the upcoming horizon, correcting late rest confirmations without touching unrelated calendar events.

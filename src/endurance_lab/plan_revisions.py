@@ -165,7 +165,7 @@ def sync_plan_revision(database=None, *, dry_run=False):
     """Failure is contained: previous valid plan remains usable by the rest of sync."""
     init_db(database)
     with connect(database) as connection:
-        plan = connection.execute('SELECT * FROM training_plans WHERE active=1 ORDER BY imported_at DESC LIMIT 1').fetchone()
+        plan = connection.execute("SELECT * FROM training_plans WHERE active=1 AND COALESCE(json_extract(metadata_json,'$.source_kind'),'coach')!='app_proposal' ORDER BY imported_at DESC LIMIT 1").fetchone()
     try:
         source = discover_workbook(plan['source_path'] if plan else None)
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
